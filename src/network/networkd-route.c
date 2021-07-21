@@ -110,6 +110,7 @@ int manager_get_route_table_from_string(const Manager *m, const char *s, uint32_
 int manager_get_route_table_to_string(const Manager *m, uint32_t table, char **ret) {
         _cleanup_free_ char *str = NULL;
         const char *s;
+        int r;
 
         assert(m);
         assert(ret);
@@ -121,17 +122,13 @@ int manager_get_route_table_to_string(const Manager *m, uint32_t table, char **r
         if (!s)
                 s = hashmap_get(m->route_table_names_by_number, UINT32_TO_PTR(table));
 
-        if (s) {
+        if (s)
                 /* Currently, this is only used in debugging logs. To not confuse any bug
                  * reports, let's include the table number. */
-                if (asprintf(&str, "%s(%" PRIu32 ")", s, table) < 0)
-                        return -ENOMEM;
-
-                *ret = TAKE_PTR(str);
-                return 0;
-        }
-
-        if (asprintf(&str, "%" PRIu32, table) < 0)
+                r = asprintf(&str, "%s(%" PRIu32 ")", s, table);
+        else
+                r = asprintf(&str, "%" PRIu32, table);
+        if (r < 0)
                 return -ENOMEM;
 
         *ret = TAKE_PTR(str);
@@ -746,6 +743,26 @@ static bool route_address_is_reachable(const Route *route, int family, const uni
                         FAMILY_ADDRESS_SIZE(family) * 8) > 0;
 }
 
+static bool prefix_route_address_is_reachable(const Address *a, int family, const union in_addr_union *address) {
+        assert(a);
+        assert(IN_SET(family, AF_INET, AF_INET6));
+        assert(address);
+
+        if (a->family != family)
+                return false;
+        if (FLAGS_SET(a->flags, IFA_F_NOPREFIXROUTE))
+                return false;
+        if (in_addr_is_set(a->family, &a->in_addr_peer))
+                return false;
+
+        return in_addr_prefix_intersect(
+                        family,
+                        &a->in_addr,
+                        a->prefixlen,
+                        address,
+                        FAMILY_ADDRESS_SIZE(family) * 8) > 0;
+}
+
 bool manager_address_is_reachable(Manager *manager, int family, const union in_addr_union *address) {
         Link *link;
 
@@ -763,6 +780,20 @@ bool manager_address_is_reachable(Manager *manager, int family, const union in_a
                         if (route_address_is_reachable(route, family, address))
                                 return true;
         }
+
+        /* If we do not manage foreign routes, then there may exist a prefix route we do not know,
+         * which was created on configuring an address. Hence, also check the addresses. */
+        if (!manager->manage_foreign_routes)
+                HASHMAP_FOREACH(link, manager->links_by_index) {
+                        Address *a;
+
+                        SET_FOREACH(a, link->addresses)
+                                if (prefix_route_address_is_reachable(a, family, address))
+                                        return true;
+                        SET_FOREACH(a, link->addresses_foreign)
+                                if (prefix_route_address_is_reachable(a, family, address))
+                                        return true;
+                }
 
         return false;
 }

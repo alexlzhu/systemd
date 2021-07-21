@@ -538,14 +538,22 @@ static uint64_t charge_weight(uint64_t total, uint64_t amount) {
         return total - amount;
 }
 
-static bool context_allocate_partitions(Context *context) {
+static bool context_allocate_partitions(Context *context, uint64_t *ret_largest_free_area) {
         Partition *p;
 
         assert(context);
 
-        /* A simple first-fit algorithm, assuming the array of free areas is sorted by size in decreasing
-         * order. */
+        /* Sort free areas by size, putting smallest first */
+        typesafe_qsort(context->free_areas, context->n_free_areas, free_area_compare);
 
+        /* In any case return size of the largest free area (i.e. not the size of all free areas
+         * combined!) */
+        if (ret_largest_free_area)
+                *ret_largest_free_area =
+                        context->n_free_areas == 0 ? 0 :
+                        free_area_available_for_new_partitions(context->free_areas[context->n_free_areas-1]);
+
+        /* A simple first-fit algorithm. We return true if we can fit the partitions in, otherwise false. */
         LIST_FOREACH(partitions, p, context->partitions) {
                 bool fits = false;
                 uint64_t required;
@@ -554,9 +562,6 @@ static bool context_allocate_partitions(Context *context) {
                 /* Skip partitions we already dropped or that already exist */
                 if (p->dropped || PARTITION_EXISTS(p))
                         continue;
-
-                /* Sort by size */
-                typesafe_qsort(context->free_areas, context->n_free_areas, free_area_compare);
 
                 /* How much do we need to fit? */
                 required = partition_min_size_with_padding(p);
@@ -1927,29 +1932,24 @@ static void context_unload_partition_table(Context *context) {
 }
 
 static int format_size_change(uint64_t from, uint64_t to, char **ret) {
-        char format_buffer1[FORMAT_BYTES_MAX], format_buffer2[FORMAT_BYTES_MAX], *buf;
-
-        if (from != UINT64_MAX)
-                format_bytes(format_buffer1, sizeof(format_buffer1), from);
-        if (to != UINT64_MAX)
-                format_bytes(format_buffer2, sizeof(format_buffer2), to);
+        char *t;
 
         if (from != UINT64_MAX) {
                 if (from == to || to == UINT64_MAX)
-                        buf = strdup(format_buffer1);
+                        t = strdup(FORMAT_BYTES(from));
                 else
-                        buf = strjoin(format_buffer1, " ", special_glyph(SPECIAL_GLYPH_ARROW), " ", format_buffer2);
+                        t = strjoin(FORMAT_BYTES(from), " ", special_glyph(SPECIAL_GLYPH_ARROW), " ", FORMAT_BYTES(to));
         } else if (to != UINT64_MAX)
-                buf = strjoin(special_glyph(SPECIAL_GLYPH_ARROW), " ", format_buffer2);
+                t = strjoin(special_glyph(SPECIAL_GLYPH_ARROW), " ", FORMAT_BYTES(to));
         else {
                 *ret = NULL;
                 return 0;
         }
 
-        if (!buf)
+        if (!t)
                 return log_oom();
 
-        *ret = TAKE_PTR(buf);
+        *ret = t;
         return 1;
 }
 
@@ -2046,11 +2046,10 @@ static int context_dump_partitions(Context *context, const char *node) {
         }
 
         if ((arg_json_format_flags & JSON_FORMAT_OFF) && (sum_padding > 0 || sum_size > 0)) {
-                char s[FORMAT_BYTES_MAX];
                 const char *a, *b;
 
-                a = strjoina(special_glyph(SPECIAL_GLYPH_SIGMA), " = ", format_bytes(s, sizeof(s), sum_size));
-                b = strjoina(special_glyph(SPECIAL_GLYPH_SIGMA), " = ", format_bytes(s, sizeof(s), sum_padding));
+                a = strjoina(special_glyph(SPECIAL_GLYPH_SIGMA), " = ", FORMAT_BYTES(sum_size));
+                b = strjoina(special_glyph(SPECIAL_GLYPH_SIGMA), " = ", FORMAT_BYTES(sum_padding));
 
                 r = table_add_many(
                                 t,
@@ -2729,7 +2728,6 @@ static int context_copy_blocks(Context *context) {
                 _cleanup_(loop_device_unrefp) LoopDevice *d = NULL;
                 _cleanup_free_ char *encrypted = NULL;
                 _cleanup_close_ int encrypted_dev_fd = -1;
-                char buf[FORMAT_BYTES_MAX];
                 int target_fd;
 
                 if (p->copy_blocks_fd < 0)
@@ -2772,7 +2770,8 @@ static int context_copy_blocks(Context *context) {
                         target_fd = whole_fd;
                 }
 
-                log_info("Copying in '%s' (%s) on block level into future partition %" PRIu64 ".", p->copy_blocks_path, format_bytes(buf, sizeof(buf), p->copy_blocks_size), p->partno);
+                log_info("Copying in '%s' (%s) on block level into future partition %" PRIu64 ".",
+                         p->copy_blocks_path, FORMAT_BYTES(p->copy_blocks_size), p->partno);
 
                 r = copy_bytes_full(p->copy_blocks_fd, target_fd, p->copy_blocks_size, 0, NULL, NULL, NULL, NULL);
                 if (r < 0)
@@ -4529,49 +4528,14 @@ static int acquire_root_devno(
         if (r < 0)
                 return log_debug_errno(r, "Failed to determine canonical path for '%s': %m", p);
 
-        /* Only if we still lock at the same block device we can reuse the fd. Otherwise return an
+        /* Only if we still look at the same block device we can reuse the fd. Otherwise return an
          * invalidated fd. */
         *ret_fd = fd_devno != MODE_INVALID && fd_devno == devno ? TAKE_FD(fd) : -1;
         return 0;
 }
 
-static int find_os_prefix(const char **ret) {
-        int r;
-
-        assert(ret);
-
-        /* Searches for the right place to look for the OS root. This is relevant in the initrd: in the
-         * initrd the host OS is typically mounted to /sysroot/ — except in setups where /usr/ is a separate
-         * partition, in which case it is mounted to /sysusr/usr/ before being moved to /sysroot/usr/. */
-
-        if (!in_initrd()) {
-                *ret = NULL; /* no prefix */
-                return 0;
-        }
-
-        r = path_is_mount_point("/sysroot", NULL, 0);
-        if (r < 0 && r != -ENOENT)
-                log_debug_errno(r, "Failed to determine whether /sysroot/ is a mount point, assuming it is not: %m");
-        else if (r > 0) {
-                log_debug("/sysroot/ is a mount point, assuming it's the prefix.");
-                *ret = "/sysroot";
-                return 0;
-        }
-
-        r = path_is_mount_point("/sysusr/usr", NULL, 0);
-        if (r < 0 && r != -ENOENT)
-                log_debug_errno(r, "Failed to determine whether /sysusr/usr is a mount point, assuming it is not: %m");
-        else if (r > 0) {
-                log_debug("/sysusr/usr/ is a mount point, assuming /sysusr/ is the prefix.");
-                *ret = "/sysusr";
-                return 0;
-        }
-
-        return -ENOENT;
-}
-
 static int find_root(char **ret, int *ret_fd) {
-        const char *t, *prefix;
+        const char *p;
         int r;
 
         assert(ret);
@@ -4612,22 +4576,7 @@ static int find_root(char **ret, int *ret_fd) {
          * latter we check for cases where / is a tmpfs and only /usr is an actual persistent block device
          * (think: volatile setups) */
 
-        r = find_os_prefix(&prefix);
-        if (r < 0)
-                return log_error_errno(r, "Failed to determine OS prefix: %m");
-
-        FOREACH_STRING(t, "/", "/usr") {
-                _cleanup_free_ char *j = NULL;
-                const char *p;
-
-                if (prefix) {
-                        j = path_join(prefix, t);
-                        if (!j)
-                                return log_oom();
-
-                        p = j;
-                } else
-                        p = t;
+        FOREACH_STRING(p, "/", "/usr") {
 
                 r = acquire_root_devno(p, arg_root, O_RDONLY|O_DIRECTORY|O_CLOEXEC, ret, ret_fd);
                 if (r < 0) {
@@ -4682,7 +4631,6 @@ static int resize_backing_fd(
                 const char *backing_file,   /* If the above refers to a loopback device, the backing regular file for that, which we can grow */
                 LoopDevice *loop_device) {
 
-        char buf1[FORMAT_BYTES_MAX], buf2[FORMAT_BYTES_MAX];
         _cleanup_close_ int writable_fd = -1;
         uint64_t current_size;
         struct stat st;
@@ -4723,11 +4671,9 @@ static int resize_backing_fd(
                 current_size = st.st_size;
         }
 
-        assert_se(format_bytes(buf1, sizeof(buf1), current_size));
-        assert_se(format_bytes(buf2, sizeof(buf2), arg_size));
-
         if (current_size >= arg_size) {
-                log_info("File '%s' already is of requested size or larger, not growing. (%s >= %s)", node, buf1, buf2);
+                log_info("File '%s' already is of requested size or larger, not growing. (%s >= %s)",
+                         node, FORMAT_BYTES(current_size), FORMAT_BYTES(arg_size));
                 return 0;
         }
 
@@ -4750,7 +4696,8 @@ static int resize_backing_fd(
 
                 if ((uint64_t) st.st_size != current_size)
                         return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
-                                               "Size of backing file '%s' of loopback block device '%s' don't match, refusing.", node, backing_file);
+                                               "Size of backing file '%s' of loopback block device '%s' don't match, refusing.",
+                                               node, backing_file);
         } else {
                 assert(S_ISREG(st.st_mode));
                 assert(!backing_file);
@@ -4768,15 +4715,16 @@ static int resize_backing_fd(
                 if (fallocate(writable_fd, 0, 0, arg_size) < 0) {
                         if (!ERRNO_IS_NOT_SUPPORTED(errno))
                                 return log_error_errno(errno, "Failed to grow '%s' from %s to %s by allocation: %m",
-                                                       node, buf1, buf2);
+                                                       node, FORMAT_BYTES(current_size), FORMAT_BYTES(arg_size));
 
                         /* Fallback to truncation, if fallocate() is not supported. */
                         log_debug("Backing file system does not support fallocate(), falling back to ftruncate().");
                 } else {
                         if (current_size == 0) /* Likely regular file just created by us */
-                                log_info("Allocated %s for '%s'.", buf2, node);
+                                log_info("Allocated %s for '%s'.", FORMAT_BYTES(arg_size), node);
                         else
-                                log_info("File '%s' grown from %s to %s by allocation.", node, buf1, buf2);
+                                log_info("File '%s' grown from %s to %s by allocation.",
+                                         node, FORMAT_BYTES(current_size), FORMAT_BYTES(arg_size));
 
                         goto done;
                 }
@@ -4784,12 +4732,13 @@ static int resize_backing_fd(
 
         if (ftruncate(writable_fd, arg_size) < 0)
                 return log_error_errno(errno, "Failed to grow '%s' from %s to %s by truncation: %m",
-                                       node, buf1, buf2);
+                                       node, FORMAT_BYTES(current_size), FORMAT_BYTES(arg_size));
 
         if (current_size == 0) /* Likely regular file just created by us */
-                log_info("Sized '%s' to %s.", node, buf2);
+                log_info("Sized '%s' to %s.", node, FORMAT_BYTES(arg_size));
         else
-                log_info("File '%s' grown from %s to %s by truncation.", node, buf1, buf2);
+                log_info("File '%s' grown from %s to %s by truncation.",
+                         node, FORMAT_BYTES(current_size), FORMAT_BYTES(arg_size));
 
 done:
         r = resize_pt(writable_fd);
@@ -4807,7 +4756,6 @@ done:
 
 static int determine_auto_size(Context *c) {
         uint64_t sum = round_up_size(GPT_METADATA_SIZE, 4096);
-        char buf[FORMAT_BYTES_MAX];
         Partition *p;
 
         assert_se(c);
@@ -4825,8 +4773,14 @@ static int determine_auto_size(Context *c) {
                 sum += m;
         }
 
-        assert_se(format_bytes(buf, sizeof(buf), sum));
-        log_info("Automatically determined minimal disk image size as %s.", buf);
+        if (c->total != UINT64_MAX)
+                /* Image already allocated? Then show its size. */
+                log_info("Automatically determined minimal disk image size as %s, current image size is %s.",
+                         FORMAT_BYTES(sum), FORMAT_BYTES(c->total));
+        else
+                /* If the image is being created right now, then it has no previous size, suppress any comment about it hence. */
+                log_info("Automatically determined minimal disk image size as %s.",
+                         FORMAT_BYTES(sum));
 
         arg_size = sum;
         return 0;
@@ -4996,13 +4950,15 @@ static int run(int argc, char *argv[]) {
 
         /* First try to fit new partitions in, dropping by priority until it fits */
         for (;;) {
-                if (context_allocate_partitions(context))
+                uint64_t largest_free_area;
+
+                if (context_allocate_partitions(context, &largest_free_area))
                         break; /* Success! */
 
                 if (!context_drop_one_priority(context)) {
                         r = log_error_errno(SYNTHETIC_ERRNO(ENOSPC),
-                                            "Can't fit requested partitions into free space, refusing.");
-
+                                            "Can't fit requested partitions into available free space (%s), refusing.",
+                                            FORMAT_BYTES(largest_free_area));
                         determine_auto_size(context);
                         return r;
                 }

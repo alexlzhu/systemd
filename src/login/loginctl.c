@@ -450,9 +450,6 @@ static int print_session_status_info(sd_bus *bus, const char *path, bool *new_li
 
         _cleanup_(sd_bus_error_free) sd_bus_error error = SD_BUS_ERROR_NULL;
         _cleanup_(sd_bus_message_unrefp) sd_bus_message *m = NULL;
-        char since1[FORMAT_TIMESTAMP_RELATIVE_MAX];
-        char since2[FORMAT_TIMESTAMP_MAX];
-        const char *s1, *s2;
         SessionStatusInfo i = {};
         int r;
 
@@ -472,13 +469,10 @@ static int print_session_status_info(sd_bus *bus, const char *path, bool *new_li
         else
                 printf("%"PRIu32"\n", i.uid);
 
-        s1 = format_timestamp_relative(since1, sizeof(since1), i.timestamp.realtime);
-        s2 = format_timestamp(since2, sizeof(since2), i.timestamp.realtime);
-
-        if (s1)
-                printf("\t   Since: %s; %s\n", s2, s1);
-        else if (s2)
-                printf("\t   Since: %s\n", s2);
+        if (i.timestamp.realtime > 0 && i.timestamp.realtime < USEC_INFINITY)
+                printf("\t   Since: %s; %s\n",
+                       FORMAT_TIMESTAMP(i.timestamp.realtime),
+                       FORMAT_TIMESTAMP_RELATIVE(i.timestamp.realtime));
 
         if (i.leader > 0) {
                 _cleanup_free_ char *t = NULL;
@@ -581,9 +575,6 @@ static int print_user_status_info(sd_bus *bus, const char *path, bool *new_line)
 
         _cleanup_(sd_bus_error_free) sd_bus_error error = SD_BUS_ERROR_NULL;
         _cleanup_(sd_bus_message_unrefp) sd_bus_message *m = NULL;
-        char since1[FORMAT_TIMESTAMP_RELATIVE_MAX];
-        char since2[FORMAT_TIMESTAMP_MAX];
-        const char *s1, *s2;
         _cleanup_(user_status_info_clear) UserStatusInfo i = {};
         int r;
 
@@ -601,13 +592,10 @@ static int print_user_status_info(sd_bus *bus, const char *path, bool *new_line)
         else
                 printf("%"PRIu32"\n", i.uid);
 
-        s1 = format_timestamp_relative(since1, sizeof(since1), i.timestamp.realtime);
-        s2 = format_timestamp(since2, sizeof(since2), i.timestamp.realtime);
-
-        if (s1)
-                printf("\t   Since: %s; %s\n", s2, s1);
-        else if (s2)
-                printf("\t   Since: %s\n", s2);
+        if (i.timestamp.realtime > 0 && i.timestamp.realtime < USEC_INFINITY)
+                printf("\t   Since: %s; %s\n",
+                       FORMAT_TIMESTAMP(i.timestamp.realtime),
+                       FORMAT_TIMESTAMP_RELATIVE(i.timestamp.realtime));
 
         if (!isempty(i.state))
                 printf("\t   State: %s\n", i.state);

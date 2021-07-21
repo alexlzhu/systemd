@@ -7,7 +7,6 @@
 
 #include "alloc-util.h"
 #include "env-file.h"
-#include "escape.h"
 #include "fd-util.h"
 #include "hostname-util.h"
 #include "missing_network.h"
@@ -21,7 +20,6 @@
 #include "string-util.h"
 #include "strv.h"
 #include "unaligned.h"
-#include "web-util.h"
 
 /* The LLDP spec calls this "txFastInit", see 9.2.5.19 */
 #define LLDP_TX_FAST_INIT 4U
@@ -414,43 +412,6 @@ void link_lldp_emit_stop(Link *link) {
         assert(link);
 
         link->lldp_emit_event_source = sd_event_source_unref(link->lldp_emit_event_source);
-}
-
-int config_parse_lldp_mud(
-                const char *unit,
-                const char *filename,
-                unsigned line,
-                const char *section,
-                unsigned section_line,
-                const char *lvalue,
-                int ltype,
-                const char *rvalue,
-                void *data,
-                void *userdata) {
-
-        _cleanup_free_ char *unescaped = NULL;
-        Network *n = data;
-        int r;
-
-        assert(filename);
-        assert(lvalue);
-        assert(rvalue);
-
-        r = cunescape(rvalue, 0, &unescaped);
-        if (r < 0) {
-                log_syntax(unit, LOG_WARNING, filename, line, r,
-                           "Failed to Failed to unescape LLDP MUD URL, ignoring: %s", rvalue);
-                return 0;
-        }
-
-        if (!http_url_is_valid(unescaped) || strlen(unescaped) > 255) {
-                log_syntax(unit, LOG_WARNING, filename, line, 0,
-                           "Failed to parse LLDP MUD URL '%s', ignoring: %m", rvalue);
-
-                return 0;
-        }
-
-        return free_and_replace(n->lldp_mud, unescaped);
 }
 
 static const char * const lldp_emit_table[_LLDP_EMIT_MAX] = {

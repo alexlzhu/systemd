@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
 
+#include <net/if.h>
 #include <netinet/in.h>
 #include <linux/if.h>
 #include <linux/if_arp.h>
@@ -20,6 +21,7 @@
 #include "ethtool-util.h"
 #include "fd-util.h"
 #include "fileio.h"
+#include "format-util.h"
 #include "fs-util.h"
 #include "ipvlan.h"
 #include "missing_network.h"
@@ -2160,6 +2162,7 @@ static int link_update_alternative_names(Link *link, sd_netlink_message *message
 }
 
 static int link_update_name(Link *link, sd_netlink_message *message) {
+        char ifname_from_index[IF_NAMESIZE + 1];
         const char *ifname;
         int r;
 
@@ -2176,6 +2179,16 @@ static int link_update_name(Link *link, sd_netlink_message *message) {
         if (streq(ifname, link->ifname))
                 return 0;
 
+        if (!format_ifname(link->ifindex, ifname_from_index))
+                return log_link_debug_errno(link, SYNTHETIC_ERRNO(ENXIO), "Could not get interface name for index %i.", link->ifindex);
+
+        if (!streq(ifname, ifname_from_index)) {
+                log_link_debug(link, "New interface name '%s' received from the kernel does not correspond "
+                               "with the name currently configured on the actual interface '%s'. Ignoring.",
+                               ifname, ifname_from_index);
+                return 0;
+        }
+
         log_link_info(link, "Interface name change detected, renamed to %s.", ifname);
 
         hashmap_remove(link->manager->links_by_name, link->ifname);
@@ -2187,6 +2200,55 @@ static int link_update_name(Link *link, sd_netlink_message *message) {
         r = hashmap_ensure_put(&link->manager->links_by_name, &string_hash_ops, link->ifname, link);
         if (r < 0)
                 return log_link_debug_errno(link, r, "Failed to manage link by its new name: %m");
+
+        if (link->dhcp_client) {
+                r = sd_dhcp_client_set_ifname(link->dhcp_client, link->ifname);
+                if (r < 0)
+                        return log_link_debug_errno(link, r, "Failed to update interface name in DHCP client: %m");
+        }
+
+        if (link->dhcp6_client) {
+                r = sd_dhcp6_client_set_ifname(link->dhcp6_client, link->ifname);
+                if (r < 0)
+                        return log_link_debug_errno(link, r, "Failed to update interface name in DHCP6 client: %m");
+        }
+
+        if (link->ndisc) {
+                r = sd_ndisc_set_ifname(link->ndisc, link->ifname);
+                if (r < 0)
+                        return log_link_debug_errno(link, r, "Failed to update interface name in NDisc: %m");
+        }
+
+        if (link->dhcp_server) {
+                r = sd_dhcp_server_set_ifname(link->dhcp_server, link->ifname);
+                if (r < 0)
+                        return log_link_debug_errno(link, r, "Failed to update interface name in DHCP server: %m");
+        }
+
+        if (link->radv) {
+                r = sd_radv_set_ifname(link->radv, link->ifname);
+                if (r < 0)
+                        return log_link_debug_errno(link, r, "Failed to update interface name in Router Advertisement: %m");
+        }
+
+        if (link->lldp) {
+                r = sd_lldp_set_ifname(link->lldp, link->ifname);
+                if (r < 0)
+                        return log_link_debug_errno(link, r, "Failed to update interface name in LLDP: %m");
+        }
+
+        if (link->ipv4ll) {
+                r = sd_ipv4ll_set_ifname(link->ipv4ll, link->ifname);
+                if (r < 0)
+                        return log_link_debug_errno(link, r, "Failed to update interface name in IPv4LL client: %m");
+        }
+
+        Address *a;
+        SET_FOREACH(a, link->addresses_ipv4acd) {
+                r = sd_ipv4acd_set_ifname(a->acd, link->ifname);
+                if (r < 0)
+                        return log_link_debug_errno(link, r, "Failed to update interface name in IPv4ACD client: %m");
+        }
 
         return 0;
 }

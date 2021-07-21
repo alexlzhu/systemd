@@ -278,6 +278,7 @@ conf.set_quoted('USER_PRESET_DIR',                            userpresetdir)
 conf.set_quoted('VENDOR_KEYRING_PATH',                        join_paths(rootlibexecdir, 'import-pubring.gpg'))
 
 conf.set('ANSI_OK_COLOR',                                     'ANSI_' + get_option('ok-color').underscorify().to_upper())
+conf.set10('ENABLE_URLIFY',                                   get_option('urlify'))
 conf.set10('ENABLE_FEXECVE',                                  get_option('fexecve'))
 conf.set10('MEMORY_ACCOUNTING_DEFAULT',                       memory_accounting_default)
 conf.set('STATUS_UNIT_FORMAT_DEFAULT',                        'STATUS_UNIT_FORMAT_' + status_unit_format_default.to_upper())
@@ -322,7 +323,6 @@ basic_disabled_warnings = [
         '-Wno-format-signedness',
         '-Wno-missing-field-initializers',
         '-Wno-unused-parameter',
-        '-Wno-unused-result',
 ]
 
 possible_common_cc_flags = [
@@ -364,6 +364,12 @@ possible_common_cc_flags = [
 if cc.get_id() == 'gcc' and (not '02'.contains(get_option('optimization')) or
                              cc.version().version_compare('<10'))
         possible_common_cc_flags += '-Wno-maybe-uninitialized'
+endif
+
+# Disable -Wno-unused-result with gcc, see
+# https://gcc.gnu.org/bugzilla/show_bug.cgi?id=66425.
+if cc.get_id() == 'gcc'
+        possible_common_cc_flags += '-Wno-unused-result'
 endif
 
 # --as-needed and --no-undefined are provided by meson by default,
@@ -1707,7 +1713,8 @@ install_libsystemd_static = static_library(
                         libcap,
                         libblkid,
                         libmount,
-                        libgcrypt],
+                        libgcrypt,
+                        libopenssl],
         c_args : libsystemd_c_args + (static_libsystemd_pic ? [] : ['-fno-PIC']))
 
 libudev = shared_library(
@@ -2949,6 +2956,17 @@ public_programs += executable(
         'src/notify/notify.c',
         include_directories : includes,
         link_with : [libshared],
+        install_rpath : rootlibexecdir,
+        install : true,
+        install_dir : rootbindir)
+
+public_programs += executable(
+        'systemd-creds',
+        'src/creds/creds.c',
+        include_directories : includes,
+        link_with : [libshared],
+        dependencies : [threads,
+                        libopenssl],
         install_rpath : rootlibexecdir,
         install : true,
         install_dir : rootbindir)

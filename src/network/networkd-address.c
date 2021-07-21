@@ -16,6 +16,7 @@
 #include "parse-util.h"
 #include "string-util.h"
 #include "strv.h"
+#include "strxcpyx.h"
 
 #define ADDRESSES_PER_LINK_MAX 2048U
 #define STATIC_ADDRESSES_PER_NETWORK_MAX 1024U
@@ -620,11 +621,21 @@ int manager_has_address(Manager *manager, int family, const union in_addr_union 
         return false;
 }
 
+const char* format_lifetime(char *buf, size_t l, uint32_t lifetime) {
+        assert(buf);
+        assert(l > 4);
+
+        if (lifetime == CACHE_INFO_INFINITY_LIFE_TIME)
+                return "forever";
+
+        sprintf(buf, "for ");
+        /* format_timespan() never fails */
+        assert_se(format_timespan(buf + 4, l - 4, lifetime * USEC_PER_SEC, USEC_PER_SEC));
+        return buf;
+}
+
 static void log_address_debug(const Address *address, const char *str, const Link *link) {
         _cleanup_free_ char *addr = NULL, *peer = NULL, *flags_str = NULL;
-        char valid_buf[FORMAT_TIMESPAN_MAX], preferred_buf[FORMAT_TIMESPAN_MAX];
-        const char *valid_str = NULL, *preferred_str = NULL;
-        bool has_peer;
 
         assert(address);
         assert(str);
@@ -634,27 +645,15 @@ static void log_address_debug(const Address *address, const char *str, const Lin
                 return;
 
         (void) in_addr_to_string(address->family, &address->in_addr, &addr);
-        has_peer = in_addr_is_set(address->family, &address->in_addr_peer);
-        if (has_peer)
+        if (in_addr_is_set(address->family, &address->in_addr_peer))
                 (void) in_addr_to_string(address->family, &address->in_addr_peer, &peer);
-
-        if (address->cinfo.ifa_valid != CACHE_INFO_INFINITY_LIFE_TIME)
-                valid_str = format_timespan(valid_buf, FORMAT_TIMESPAN_MAX,
-                                            address->cinfo.ifa_valid * USEC_PER_SEC,
-                                            USEC_PER_SEC);
-
-        if (address->cinfo.ifa_prefered != CACHE_INFO_INFINITY_LIFE_TIME)
-                preferred_str = format_timespan(preferred_buf, FORMAT_TIMESPAN_MAX,
-                                                address->cinfo.ifa_prefered * USEC_PER_SEC,
-                                                USEC_PER_SEC);
 
         (void) address_flags_to_string_alloc(address->flags, address->family, &flags_str);
 
-        log_link_debug(link, "%s address: %s%s%s/%u (valid %s%s, preferred %s%s), flags: %s",
-                       str, strnull(addr), has_peer ? " peer " : "",
-                       has_peer ? strnull(peer) : "", address->prefixlen,
-                       valid_str ? "for " : "forever", strempty(valid_str),
-                       preferred_str ? "for " : "forever", strempty(preferred_str),
+        log_link_debug(link, "%s address: %s%s%s/%u (valid %s, preferred %s), flags: %s",
+                       str, strnull(addr), peer ? " peer " : "", strempty(peer), address->prefixlen,
+                       FORMAT_LIFETIME(address->cinfo.ifa_valid),
+                       FORMAT_LIFETIME(address->cinfo.ifa_prefered),
                        strna(flags_str));
 }
 
@@ -1272,16 +1271,16 @@ int request_process_address(Request *req) {
         if (r <= 0)
                 return r;
 
-        r = address_get(link, req->address, &a);
-        if (r < 0)
-                return r;
-
-        r = address_configure(a, link, req->netlink_handler);
+        r = address_configure(req->address, link, req->netlink_handler);
         if (r < 0)
                 return r;
 
         /* To prevent a double decrement on failure in after_configure(). */
         req->message_counter = NULL;
+
+        r = address_get(link, req->address, &a);
+        if (r < 0)
+                return r;
 
         if (req->after_configure) {
                 r = req->after_configure(req, a);

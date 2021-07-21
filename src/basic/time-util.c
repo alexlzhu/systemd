@@ -553,14 +553,12 @@ char *format_timespan(char *buf, size_t l, usec_t t, usec_t accuracy) {
 
                 /* Let's see if we should shows this in dot notation */
                 if (t < USEC_PER_MINUTE && b > 0) {
-                        usec_t cc;
-                        signed char j;
+                        signed char j = 0;
 
-                        j = 0;
-                        for (cc = table[i].usec; cc > 1; cc /= 10)
+                        for (usec_t cc = table[i].usec; cc > 1; cc /= 10)
                                 j++;
 
-                        for (cc = accuracy; cc > 1; cc /= 10) {
+                        for (usec_t cc = accuracy; cc > 1; cc /= 10) {
                                 b /= 10;
                                 j--;
                         }
@@ -1334,10 +1332,10 @@ static int get_timezones_from_tzdata_zi(char ***ret) {
                         continue;
 
                 char *tz;
-                if (*type == 'Z' || *type == 'z')
+                if (IN_SET(*type, 'Z', 'z'))
                         /* Zone lines have timezone in field 1. */
                         tz = f1;
-                else if (*type == 'L' || *type == 'l')
+                else if (IN_SET(*type, 'L', 'l'))
                         /* Link lines have timezone in field 2. */
                         tz = f2;
                 else
