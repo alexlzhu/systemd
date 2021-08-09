@@ -1791,6 +1791,9 @@ static int verify_shutdown_creds(
         assert(message);
         assert(w >= 0);
         assert(w <= _INHIBIT_WHAT_MAX);
+        assert(action);
+        assert(action_multiple_sessions);
+        assert(action_ignore_inhibit);
 
         r = sd_bus_query_sender_creds(message, SD_BUS_CREDS_EUID, &creds);
         if (r < 0)
@@ -1808,7 +1811,7 @@ static int verify_shutdown_creds(
         blocked = manager_is_inhibited(m, w, INHIBIT_BLOCK, NULL, false, true, uid, NULL);
         interactive = flags & SD_LOGIND_INTERACTIVE;
 
-        if (multiple_sessions && action_multiple_sessions) {
+        if (multiple_sessions) {
                 r = bus_verify_polkit_async(message, CAP_SYS_BOOT, action_multiple_sessions, NULL, interactive, UID_INVALID, &m->polkit_registry, error);
                 if (r < 0)
                         return r;
@@ -1822,16 +1825,14 @@ static int verify_shutdown_creds(
                         return sd_bus_error_setf(error, SD_BUS_ERROR_ACCESS_DENIED,
                                                  "Access denied to root due to active block inhibitor");
 
-                if (action_ignore_inhibit) {
-                        r = bus_verify_polkit_async(message, CAP_SYS_BOOT, action_ignore_inhibit, NULL, interactive, UID_INVALID, &m->polkit_registry, error);
-                        if (r < 0)
-                                return r;
-                        if (r == 0)
-                                return 1; /* No authorization for now, but the async polkit stuff will call us again when it has it */
-                }
+                r = bus_verify_polkit_async(message, CAP_SYS_BOOT, action_ignore_inhibit, NULL, interactive, UID_INVALID, &m->polkit_registry, error);
+                if (r < 0)
+                        return r;
+                if (r == 0)
+                        return 1; /* No authorization for now, but the async polkit stuff will call us again when it has it */
         }
 
-        if (!multiple_sessions && !blocked && action) {
+        if (!multiple_sessions && !blocked) {
                 r = bus_verify_polkit_async(message, CAP_SYS_BOOT, action, NULL, interactive, UID_INVALID, &m->polkit_registry, error);
                 if (r < 0)
                         return r;
@@ -2140,7 +2141,7 @@ static int manager_scheduled_shutdown_handler(
         else if (streq(m->scheduled_shutdown_type, "halt"))
                 target = SPECIAL_HALT_TARGET;
         else
-                assert_not_reached("unexpected shutdown type");
+                assert_not_reached();
 
         /* Don't allow multiple jobs being executed at the same time */
         if (m->action_what > 0) {

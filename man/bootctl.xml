@@ -233,15 +233,16 @@
 
       <varlistentry>
         <term><option>--graceful</option></term>
-        <listitem><para>Ignore failure when the EFI System Partition cannot be found, or when EFI variables
-        cannot be written. Currently only applies to random seed operations.</para></listitem>
+        <listitem><para>Ignore failure when the EFI System Partition cannot be found, when EFI variables
+        cannot be written, or a different or newer boot loader is already installed. Currently only applies
+        to random seed and update operations.</para></listitem>
       </varlistentry>
 
       <varlistentry>
         <term><option>--make-machine-id-directory=yes|no|auto</option></term>
         <listitem><para>Control creation and deletion of the top-level machine ID directory on the file
-        system containing boot loader entries (i.e. beneath the file system returned by
-        <option>--print-boot-path</option> above) during <option>install</option> and
+        system containing boot loader entries (i.e. beneath the file system returned by the
+        <option>--print-boot-path</option> option, see above) during <option>install</option> and
         <option>remove</option>, respectively.  <literal>auto</literal> is equivalent to
         <literal>yes</literal> if <filename>/etc/machine-id</filename> resides on a filesystem other than
         tmpfs and <literal>no</literal> otherwise (in the latter case the machine ID is likely transient and

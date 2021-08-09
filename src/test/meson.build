@@ -15,7 +15,7 @@ path = run_command(sh, '-c', 'echo "$PATH"').stdout().strip()
 test_env = environment()
 test_env.set('SYSTEMD_KBD_MODEL_MAP', kbd_model_map)
 test_env.set('SYSTEMD_LANGUAGE_FALLBACK_MAP', language_fallback_map)
-test_env.set('PATH', '@0@:@1@'.format(meson.build_root(), path))
+test_env.set('PATH', project_build_root + ':' + path)
 
 ############################################################
 
@@ -249,6 +249,8 @@ tests += [
         [['src/test/test-parse-util.c']],
 
         [['src/test/test-sysctl-util.c']],
+
+        [['src/test/test-import-util.c']],
 
         [['src/test/test-user-record.c']],
 

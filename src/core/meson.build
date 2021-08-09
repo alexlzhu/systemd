@@ -87,6 +87,8 @@ libcore_sources = '''
         locale-setup.h
         manager-dump.c
         manager-dump.h
+        manager-serialize.c
+        manager-serialize.h
         manager.c
         manager.h
         mount.c
@@ -208,9 +210,9 @@ meson.add_install_script('sh', '-c', mkdir_p.format(systemgeneratordir))
 meson.add_install_script('sh', '-c', mkdir_p.format(usergeneratordir))
 
 if install_sysconfdir
-        meson.add_install_script('sh', '-c', mkdir_p.format(join_paths(pkgsysconfdir, 'system')))
-        meson.add_install_script('sh', '-c', mkdir_p.format(join_paths(pkgsysconfdir, 'user')))
-        meson.add_install_script('sh', '-c', mkdir_p.format(join_paths(sysconfdir, 'xdg/systemd')))
+        meson.add_install_script('sh', '-c', mkdir_p.format(pkgsysconfdir / 'system'))
+        meson.add_install_script('sh', '-c', mkdir_p.format(pkgsysconfdir / 'user'))
+        meson.add_install_script('sh', '-c', mkdir_p.format(sysconfdir / 'xdg/systemd'))
 endif
 
 ############################################################

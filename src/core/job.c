@@ -407,7 +407,7 @@ bool job_type_is_redundant(JobType a, UnitActiveState b) {
                 return true;
 
         default:
-                assert_not_reached("Invalid job type");
+                assert_not_reached();
         }
 }
 
@@ -781,7 +781,7 @@ static int job_perform_on_unit(Job **j) {
                         break;
 
                 default:
-                        assert_not_reached("Invalid job type");
+                        assert_not_reached();
         }
 
         /* Log if the job still exists and the start/stop/reload function actually did something. Note that this means
@@ -849,7 +849,7 @@ int job_run_and_invalidate(Job *j) {
                         break;
 
                 default:
-                        assert_not_reached("Unknown job type");
+                        assert_not_reached();
         }
 
         if (j) {
@@ -1511,44 +1511,44 @@ static const char* const job_state_table[_JOB_STATE_MAX] = {
 DEFINE_STRING_TABLE_LOOKUP(job_state, JobState);
 
 static const char* const job_type_table[_JOB_TYPE_MAX] = {
-        [JOB_START] = "start",
-        [JOB_VERIFY_ACTIVE] = "verify-active",
-        [JOB_STOP] = "stop",
-        [JOB_RELOAD] = "reload",
+        [JOB_START]           = "start",
+        [JOB_VERIFY_ACTIVE]   = "verify-active",
+        [JOB_STOP]            = "stop",
+        [JOB_RELOAD]          = "reload",
         [JOB_RELOAD_OR_START] = "reload-or-start",
-        [JOB_RESTART] = "restart",
-        [JOB_TRY_RESTART] = "try-restart",
-        [JOB_TRY_RELOAD] = "try-reload",
-        [JOB_NOP] = "nop",
+        [JOB_RESTART]         = "restart",
+        [JOB_TRY_RESTART]     = "try-restart",
+        [JOB_TRY_RELOAD]      = "try-reload",
+        [JOB_NOP]             = "nop",
 };
 
 DEFINE_STRING_TABLE_LOOKUP(job_type, JobType);
 
 static const char* const job_mode_table[_JOB_MODE_MAX] = {
-        [JOB_FAIL] = "fail",
-        [JOB_REPLACE] = "replace",
+        [JOB_FAIL]                 = "fail",
+        [JOB_REPLACE]              = "replace",
         [JOB_REPLACE_IRREVERSIBLY] = "replace-irreversibly",
-        [JOB_ISOLATE] = "isolate",
-        [JOB_FLUSH] = "flush",
-        [JOB_IGNORE_DEPENDENCIES] = "ignore-dependencies",
-        [JOB_IGNORE_REQUIREMENTS] = "ignore-requirements",
-        [JOB_TRIGGERING] = "triggering",
+        [JOB_ISOLATE]              = "isolate",
+        [JOB_FLUSH]                = "flush",
+        [JOB_IGNORE_DEPENDENCIES]  = "ignore-dependencies",
+        [JOB_IGNORE_REQUIREMENTS]  = "ignore-requirements",
+        [JOB_TRIGGERING]           = "triggering",
 };
 
 DEFINE_STRING_TABLE_LOOKUP(job_mode, JobMode);
 
 static const char* const job_result_table[_JOB_RESULT_MAX] = {
-        [JOB_DONE] = "done",
-        [JOB_CANCELED] = "canceled",
-        [JOB_TIMEOUT] = "timeout",
-        [JOB_FAILED] = "failed",
-        [JOB_DEPENDENCY] = "dependency",
-        [JOB_SKIPPED] = "skipped",
-        [JOB_INVALID] = "invalid",
-        [JOB_ASSERT] = "assert",
+        [JOB_DONE]        = "done",
+        [JOB_CANCELED]    = "canceled",
+        [JOB_TIMEOUT]     = "timeout",
+        [JOB_FAILED]      = "failed",
+        [JOB_DEPENDENCY]  = "dependency",
+        [JOB_SKIPPED]     = "skipped",
+        [JOB_INVALID]     = "invalid",
+        [JOB_ASSERT]      = "assert",
         [JOB_UNSUPPORTED] = "unsupported",
-        [JOB_COLLECTED] = "collected",
-        [JOB_ONCE] = "once",
+        [JOB_COLLECTED]   = "collected",
+        [JOB_ONCE]        = "once",
 };
 
 DEFINE_STRING_TABLE_LOOKUP(job_result, JobResult);

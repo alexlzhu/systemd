@@ -562,7 +562,7 @@ static int scope_dispatch_timer(sd_event_source *source, usec_t usec, void *user
                 break;
 
         default:
-                assert_not_reached("Timeout at wrong time.");
+                assert_not_reached();
         }
 
         return 0;
@@ -632,9 +632,9 @@ static void scope_enumerate_perpetual(Manager *m) {
 }
 
 static const char* const scope_result_table[_SCOPE_RESULT_MAX] = {
-        [SCOPE_SUCCESS] = "success",
+        [SCOPE_SUCCESS]           = "success",
         [SCOPE_FAILURE_RESOURCES] = "resources",
-        [SCOPE_FAILURE_TIMEOUT] = "timeout",
+        [SCOPE_FAILURE_TIMEOUT]   = "timeout",
 };
 
 DEFINE_STRING_TABLE_LOOKUP(scope_result, ScopeResult);

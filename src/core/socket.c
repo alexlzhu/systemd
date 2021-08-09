@@ -433,7 +433,7 @@ static void peer_address_hash_func(const SocketPeer *s, struct siphash *state) {
         else if (s->peer.sa.sa_family == AF_VSOCK)
                 siphash24_compress(&s->peer.vm.svm_cid, sizeof(s->peer.vm.svm_cid), state);
         else
-                assert_not_reached("Unknown address family.");
+                assert_not_reached();
 }
 
 static int peer_address_compare_func(const SocketPeer *x, const SocketPeer *y) {
@@ -451,7 +451,7 @@ static int peer_address_compare_func(const SocketPeer *x, const SocketPeer *y) {
         case AF_VSOCK:
                 return CMP(x->peer.vm.svm_cid, y->peer.vm.svm_cid);
         }
-        assert_not_reached("Black sheep in the family!");
+        assert_not_reached();
 }
 
 DEFINE_PRIVATE_HASH_OPS(peer_address_hash_ops, SocketPeer, peer_address_hash_func, peer_address_compare_func);
@@ -558,7 +558,7 @@ _const_ static const char* listen_lookup(int family, int type) {
         else if (type == SOCK_SEQPACKET)
                 return "ListenSequentialPacket";
 
-        assert_not_reached("Unknown socket type");
+        assert_not_reached();
         return NULL;
 }
 
@@ -914,7 +914,7 @@ static int instance_from_socket(int fd, unsigned nr, char **instance) {
                 break;
 
         default:
-                assert_not_reached("Unhandled socket type.");
+                assert_not_reached();
         }
 
         *instance = r;
@@ -1724,7 +1724,7 @@ static int socket_open_fds(Socket *orig_s) {
                         break;
                 }
                 default:
-                        assert_not_reached("Unknown port type");
+                        assert_not_reached();
                 }
         }
 
@@ -3071,7 +3071,7 @@ static void socket_sigchld_event(Unit *u, pid_t pid, int code, int status) {
         else if (code == CLD_DUMPED)
                 f = SOCKET_FAILURE_CORE_DUMP;
         else
-                assert_not_reached("Unknown sigchld code");
+                assert_not_reached();
 
         if (s->control_command) {
                 exec_status_exit(&s->control_command->exec_status, &s->exec_context, pid, code, status);
@@ -3149,7 +3149,7 @@ static void socket_sigchld_event(Unit *u, pid_t pid, int code, int status) {
                         break;
 
                 default:
-                        assert_not_reached("Uh, control process died at wrong time.");
+                        assert_not_reached();
                 }
         }
 
@@ -3226,7 +3226,7 @@ static int socket_dispatch_timer(sd_event_source *source, usec_t usec, void *use
                 break;
 
         default:
-                assert_not_reached("Timeout at wrong time.");
+                assert_not_reached();
         }
 
         return 0;
@@ -3425,24 +3425,24 @@ static int socket_can_clean(Unit *u, ExecCleanMask *ret) {
 }
 
 static const char* const socket_exec_command_table[_SOCKET_EXEC_COMMAND_MAX] = {
-        [SOCKET_EXEC_START_PRE] = "ExecStartPre",
+        [SOCKET_EXEC_START_PRE]   = "ExecStartPre",
         [SOCKET_EXEC_START_CHOWN] = "ExecStartChown",
-        [SOCKET_EXEC_START_POST] = "ExecStartPost",
-        [SOCKET_EXEC_STOP_PRE] = "ExecStopPre",
-        [SOCKET_EXEC_STOP_POST] = "ExecStopPost"
+        [SOCKET_EXEC_START_POST]  = "ExecStartPost",
+        [SOCKET_EXEC_STOP_PRE]    = "ExecStopPre",
+        [SOCKET_EXEC_STOP_POST]   = "ExecStopPost"
 };
 
 DEFINE_STRING_TABLE_LOOKUP(socket_exec_command, SocketExecCommand);
 
 static const char* const socket_result_table[_SOCKET_RESULT_MAX] = {
-        [SOCKET_SUCCESS] = "success",
-        [SOCKET_FAILURE_RESOURCES] = "resources",
-        [SOCKET_FAILURE_TIMEOUT] = "timeout",
-        [SOCKET_FAILURE_EXIT_CODE] = "exit-code",
-        [SOCKET_FAILURE_SIGNAL] = "signal",
-        [SOCKET_FAILURE_CORE_DUMP] = "core-dump",
-        [SOCKET_FAILURE_START_LIMIT_HIT] = "start-limit-hit",
-        [SOCKET_FAILURE_TRIGGER_LIMIT_HIT] = "trigger-limit-hit",
+        [SOCKET_SUCCESS]                         = "success",
+        [SOCKET_FAILURE_RESOURCES]               = "resources",
+        [SOCKET_FAILURE_TIMEOUT]                 = "timeout",
+        [SOCKET_FAILURE_EXIT_CODE]               = "exit-code",
+        [SOCKET_FAILURE_SIGNAL]                  = "signal",
+        [SOCKET_FAILURE_CORE_DUMP]               = "core-dump",
+        [SOCKET_FAILURE_START_LIMIT_HIT]         = "start-limit-hit",
+        [SOCKET_FAILURE_TRIGGER_LIMIT_HIT]       = "trigger-limit-hit",
         [SOCKET_FAILURE_SERVICE_START_LIMIT_HIT] = "service-start-limit-hit"
 };
 
@@ -3450,8 +3450,8 @@ DEFINE_STRING_TABLE_LOOKUP(socket_result, SocketResult);
 
 static const char* const socket_timestamping_table[_SOCKET_TIMESTAMPING_MAX] = {
         [SOCKET_TIMESTAMPING_OFF] = "off",
-        [SOCKET_TIMESTAMPING_US] = "us",
-        [SOCKET_TIMESTAMPING_NS] = "ns",
+        [SOCKET_TIMESTAMPING_US]  = "us",
+        [SOCKET_TIMESTAMPING_NS]  = "ns",
 };
 
 DEFINE_STRING_TABLE_LOOKUP(socket_timestamping, SocketTimestamping);

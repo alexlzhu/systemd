@@ -182,10 +182,14 @@ option('xinitrcdir', type : 'string', value : '',
        description : 'directory for xinitrc files')
 option('rpmmacrosdir', type : 'string', value : 'lib/rpm/macros.d',
        description : 'directory for rpm macros ["no" disables]')
+option('update-helper-user-timeout', type : 'string', value : '15s',
+       description : 'how long to wait for user manager operations')
 option('pamlibdir', type : 'string',
        description : 'directory for PAM modules')
 option('pamconfdir', type : 'string',
        description : 'directory for PAM configuration ["no" disables]')
+option('libcryptsetup-plugins-dir', type : 'string',
+       description : 'directory for libcryptsetup plugins')
 option('docdir', type : 'string',
        description : 'documentation directory')
 option('install-sysconfdir', type : 'combo', choices : ['true', 'no-samples', 'false'], value : 'true',
@@ -204,6 +208,8 @@ option('status-unit-format-default', type : 'combo',
        description : 'use unit name or description in messages by default')
 option('time-epoch', type : 'integer', value : '-1',
        description : 'time epoch for time clients')
+option('clock-valid-range-usec-max', type : 'integer', value : '473364000000000', # 15 years
+       description : 'maximum value in microseconds for the difference between RTC and epoch, exceeding which is considered an RTC error')
 
 option('system-alloc-uid-min', type : 'integer', value : '-1',
        description : 'minimum system UID used when allocating')
@@ -353,6 +359,8 @@ option('microhttpd', type : 'combo', choices : ['auto', 'true', 'false'],
        description : 'libµhttpd support')
 option('libcryptsetup', type : 'combo', choices : ['auto', 'true', 'false'],
        description : 'libcryptsetup support')
+option('libcryptsetup-plugins', type : 'combo', choices : ['auto', 'true', 'false'],
+       description : 'libcryptsetup LUKS2 external token handlers support (plugins)')
 option('libcurl', type : 'combo', choices : ['auto', 'true', 'false'],
        description : 'libcurl support')
 option('idn', type : 'boolean',

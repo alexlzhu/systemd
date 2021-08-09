@@ -765,7 +765,9 @@ static int ndisc_router_process_autonomous_prefix(Link *link, sd_ndisc_router *r
         assert(link);
         assert(rt);
 
-        r = sd_ndisc_router_get_timestamp(rt, clock_boottime_or_monotonic(), &time_now);
+        /* Do not use clock_boottime_or_monotonic() here, as the kernel internally manages cstamp and
+         * tstamp with jiffies, and it is not increased while the system is suspended. */
+        r = sd_ndisc_router_get_timestamp(rt, CLOCK_MONOTONIC, &time_now);
         if (r < 0)
                 return log_link_error_errno(link, r, "Failed to get RA timestamp: %m");
 
@@ -1350,7 +1352,7 @@ static void ndisc_handler(sd_ndisc *nd, sd_ndisc_event_t event, sd_ndisc_router 
                 }
                 break;
         default:
-                assert_not_reached("Unknown NDisc event");
+                assert_not_reached();
         }
 }
 

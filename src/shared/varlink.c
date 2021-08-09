@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
 
 #include <malloc.h>
-#include <sys/poll.h>
+#include <poll.h>
 
 #include "alloc-util.h"
 #include "errno-util.h"
@@ -905,7 +905,7 @@ static int varlink_dispatch_method(Varlink *v) {
                 break;
 
         default:
-                assert_not_reached("Unexpected state");
+                assert_not_reached();
 
         }
 
@@ -1521,7 +1521,7 @@ int varlink_call(
                 return varlink_log_errno(v, SYNTHETIC_ERRNO(ETIME), "Connection timed out.");
 
         default:
-                assert_not_reached("Unexpected state after method call.");
+                assert_not_reached();
         }
 }
 

@@ -1223,7 +1223,7 @@ static int mount_stop(Unit *u) {
                 return 0;
 
         default:
-                assert_not_reached("Unexpected state.");
+                assert_not_reached();
         }
 }
 
@@ -1383,7 +1383,7 @@ static void mount_sigchld_event(Unit *u, pid_t pid, int code, int status) {
         else if (code == CLD_DUMPED)
                 f = MOUNT_FAILURE_CORE_DUMP;
         else
-                assert_not_reached("Unknown code");
+                assert_not_reached();
 
         if (IN_SET(m->state, MOUNT_REMOUNTING, MOUNT_REMOUNTING_SIGKILL, MOUNT_REMOUNTING_SIGTERM))
                 mount_set_reload_result(m, f);
@@ -1465,7 +1465,7 @@ static void mount_sigchld_event(Unit *u, pid_t pid, int code, int status) {
                 break;
 
         default:
-                assert_not_reached("Uh, control process died at wrong time.");
+                assert_not_reached();
         }
 
         /* Notify clients about changed exit status */
@@ -1541,7 +1541,7 @@ static int mount_dispatch_timer(sd_event_source *source, usec_t usec, void *user
                 break;
 
         default:
-                assert_not_reached("Timeout at wrong time.");
+                assert_not_reached();
         }
 
         return 0;
@@ -2139,7 +2139,7 @@ static int mount_can_clean(Unit *u, ExecCleanMask *ret) {
 }
 
 static const char* const mount_exec_command_table[_MOUNT_EXEC_COMMAND_MAX] = {
-        [MOUNT_EXEC_MOUNT] = "ExecMount",
+        [MOUNT_EXEC_MOUNT]   = "ExecMount",
         [MOUNT_EXEC_UNMOUNT] = "ExecUnmount",
         [MOUNT_EXEC_REMOUNT] = "ExecRemount",
 };
@@ -2147,14 +2147,14 @@ static const char* const mount_exec_command_table[_MOUNT_EXEC_COMMAND_MAX] = {
 DEFINE_STRING_TABLE_LOOKUP(mount_exec_command, MountExecCommand);
 
 static const char* const mount_result_table[_MOUNT_RESULT_MAX] = {
-        [MOUNT_SUCCESS] = "success",
-        [MOUNT_FAILURE_RESOURCES] = "resources",
-        [MOUNT_FAILURE_TIMEOUT] = "timeout",
-        [MOUNT_FAILURE_EXIT_CODE] = "exit-code",
-        [MOUNT_FAILURE_SIGNAL] = "signal",
-        [MOUNT_FAILURE_CORE_DUMP] = "core-dump",
+        [MOUNT_SUCCESS]                 = "success",
+        [MOUNT_FAILURE_RESOURCES]       = "resources",
+        [MOUNT_FAILURE_TIMEOUT]         = "timeout",
+        [MOUNT_FAILURE_EXIT_CODE]       = "exit-code",
+        [MOUNT_FAILURE_SIGNAL]          = "signal",
+        [MOUNT_FAILURE_CORE_DUMP]       = "core-dump",
         [MOUNT_FAILURE_START_LIMIT_HIT] = "start-limit-hit",
-        [MOUNT_FAILURE_PROTOCOL] = "protocol",
+        [MOUNT_FAILURE_PROTOCOL]        = "protocol",
 };
 
 DEFINE_STRING_TABLE_LOOKUP(mount_result, MountResult);

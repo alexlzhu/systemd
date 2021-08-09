@@ -418,7 +418,7 @@ bool unit_may_gc(Unit *u) {
                 break;
 
         default:
-                assert_not_reached("Unknown garbage collection mode");
+                assert_not_reached();
         }
 
         if (u->cgroup_path) {
@@ -427,7 +427,7 @@ bool unit_may_gc(Unit *u) {
 
                 r = cg_is_empty_recursive(SYSTEMD_CGROUP_CONTROLLER, u->cgroup_path);
                 if (r < 0)
-                        log_unit_debug_errno(u, r, "Failed to determine whether cgroup %s is empty: %m", u->cgroup_path);
+                        log_unit_debug_errno(u, r, "Failed to determine whether cgroup %s is empty: %m", empty_to_root(u->cgroup_path));
                 if (r <= 0)
                         return false;
         }
@@ -2591,7 +2591,7 @@ static bool unit_process_job(Job *j, UnitActiveState ns, UnitNotifyFlags flags) 
                 break;
 
         default:
-                assert_not_reached("Job type unknown");
+                assert_not_reached();
         }
 
         return unexpected;
@@ -2983,7 +2983,7 @@ bool unit_job_is_applicable(Unit *u, JobType j) {
                 return unit_can_reload(u) && unit_can_start(u);
 
         default:
-                assert_not_reached("Invalid job type");
+                assert_not_reached();
         }
 }
 
@@ -4459,7 +4459,7 @@ static int operation_to_signal(const KillContext *c, KillOperation k, bool *note
                 return c->watchdog_signal;
 
         default:
-                assert_not_reached("KillOperation unknown");
+                assert_not_reached();
         }
 }
 
@@ -4548,7 +4548,7 @@ int unit_kill_context(
                                       log_func, u);
                 if (r < 0) {
                         if (!IN_SET(r, -EAGAIN, -ESRCH, -ENOENT))
-                                log_unit_warning_errno(u, r, "Failed to kill control group %s, ignoring: %m", u->cgroup_path);
+                                log_unit_warning_errno(u, r, "Failed to kill control group %s, ignoring: %m", empty_to_root(u->cgroup_path));
 
                 } else if (r > 0) {
 
@@ -5006,7 +5006,7 @@ int unit_fork_helper_process(Unit *u, const char *name, pid_t *ret) {
         if (u->cgroup_path) {
                 r = cg_attach_everywhere(u->manager->cgroup_supported, u->cgroup_path, 0, NULL, NULL);
                 if (r < 0) {
-                        log_unit_error_errno(u, r, "Failed to join unit cgroup %s: %m", u->cgroup_path);
+                        log_unit_error_errno(u, r, "Failed to join unit cgroup %s: %m", empty_to_root(u->cgroup_path));
                         _exit(EXIT_CGROUP);
                 }
         }

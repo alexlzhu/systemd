@@ -83,6 +83,8 @@ Janitorial Clean-ups:
 
 Features:
 
+* use credentials logic/TPM2 logic to store homed signing key
+
 * New udev block device symlink names:
   /dev/disk/by-parttypelabel/<pttype>/<ptlabel>. Use case: if pt label is used
   as partition image version string, this is a safe way to reference a specific
@@ -378,9 +380,8 @@ Features:
   https://docs.microsoft.com/en-us/windows-hardware/design/device-experiences/modern-standby-wake-sources
   at the end).
 
-* We should probably replace /var/log/README, /etc/rc.d/README with symlinks
-  that are linked to these places instead of copied. After all they are
-  constant vendor data.
+* We should probably replace /etc/rc.d/README with a symlink to doc
+  content. After all it is constant vendor data.
 
 * maybe add kernel cmdline params: to force random seed crediting
 
@@ -1018,10 +1019,6 @@ Features:
 
 * bootctl,sd-boot: actually honour the "architecture" key
 
-* sd-boot: add service that automatically runs "bootctl update" on every boot,
-  in a graceful way, so that updated /usr trees automatically propagate into
-  updated boot loaders on reboot.
-
 * bootctl:
   - teach it to prepare an ESP wholesale, i.e. with mkfs.vfat invocation
   - teach it to copy in unified kernel images and maybe type #1 boot loader spec entries from host
@@ -1190,6 +1187,9 @@ Features:
   - introduce API for "making room", that grows/shrinks home directory
     according to elastic parameters, discards blocks, and removes additional snapshots. Call it
     either from UI when disk space gets low
+  - when homed is in use, maybe start the user session manager in a mount namespace with MS_SLAVE,
+    so that mounts propagate down but not up - eg, user A setting up a backup volume
+    doesn't mean user B sees it
 
 * homed: during login resize fs automatically towards size goal. Specifically,
   resize to diskSize if possible, but leave a certain amount (configured by a
