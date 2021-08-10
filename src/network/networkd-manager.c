@@ -59,9 +59,9 @@ static int manager_reset_all(Manager *m) {
         assert(m);
 
         HASHMAP_FOREACH(link, m->links_by_index) {
-                r = link_carrier_reset(link);
+                r = link_reconfigure_after_sleep(link);
                 if (r < 0) {
-                        log_link_warning_errno(link, r, "Could not reset carrier: %m");
+                        log_link_warning_errno(link, r, "Failed to reconfigure interface: %m");
                         link_enter_failed(link);
                 }
         }
@@ -103,7 +103,7 @@ static int on_connected(sd_bus_message *message, void *userdata, sd_bus_error *r
                 (void) manager_set_hostname(m, m->dynamic_hostname);
         if (m->dynamic_timezone)
                 (void) manager_set_timezone(m, m->dynamic_timezone);
-        if (!set_isempty(m->links_requesting_uuid))
+        if (m->product_uuid_requested)
                 (void) manager_request_product_uuid(m);
 
         return 0;
@@ -460,7 +460,6 @@ Manager* manager_free(Manager *m) {
         m->dhcp6_pd_prefixes = set_free_with_destructor(m->dhcp6_pd_prefixes, dhcp6_pd_free);
 
         m->dirty_links = set_free_with_destructor(m->dirty_links, link_unref);
-        m->links_requesting_uuid = set_free_with_destructor(m->links_requesting_uuid, link_unref);
         m->links_by_name = hashmap_free(m->links_by_name);
         m->links_by_hw_addr = hashmap_free(m->links_by_hw_addr);
         m->links_by_index = hashmap_free_with_destructor(m->links_by_index, link_unref);
