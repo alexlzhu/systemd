@@ -1437,6 +1437,10 @@ static void manager_clear_jobs_and_units(Manager *m) {
         assert(!m->cleanup_queue);
         assert(!m->gc_unit_queue);
         assert(!m->gc_job_queue);
+        assert(!m->cgroup_realize_queue);
+        assert(!m->cgroup_empty_queue);
+        assert(!m->cgroup_oom_queue);
+        assert(!m->target_deps_queue);
         assert(!m->stop_when_unneeded_queue);
         assert(!m->start_when_upheld_queue);
         assert(!m->stop_when_bound_queue);
@@ -1727,7 +1731,7 @@ void manager_reloading_stopp(Manager **m) {
         }
 }
 
-int manager_startup(Manager *m, FILE *serialization, FDSet *fds) {
+int manager_startup(Manager *m, FILE *serialization, FDSet *fds, const char *root) {
         int r;
 
         assert(m);
@@ -1736,7 +1740,7 @@ int manager_startup(Manager *m, FILE *serialization, FDSet *fds) {
          * but we should not touch the real generator directories. */
         r = lookup_paths_init(&m->lookup_paths, m->unit_file_scope,
                               MANAGER_IS_TEST_RUN(m) ? LOOKUP_PATHS_TEMPORARY_GENERATED : 0,
-                              NULL);
+                              root);
         if (r < 0)
                 return log_error_errno(r, "Failed to initialize path lookup table: %m");
 
@@ -3672,7 +3676,7 @@ int manager_transient_environment_add(Manager *m, char **plus) {
         if (strv_isempty(plus))
                 return 0;
 
-        a = strv_env_merge(2, m->transient_environment, plus);
+        a = strv_env_merge(m->transient_environment, plus);
         if (!a)
                 return log_oom();
 
@@ -3704,7 +3708,7 @@ int manager_client_environment_modify(
         }
 
         if (!strv_isempty(plus)) {
-                b = strv_env_merge(2, l, plus);
+                b = strv_env_merge(l, plus);
                 if (!b) {
                         strv_free(a);
                         return -ENOMEM;
@@ -3731,7 +3735,7 @@ int manager_get_effective_environment(Manager *m, char ***ret) {
         assert(m);
         assert(ret);
 
-        l = strv_env_merge(2, m->transient_environment, m->client_environment);
+        l = strv_env_merge(m->transient_environment, m->client_environment);
         if (!l)
                 return -ENOMEM;
 
