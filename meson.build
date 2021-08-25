@@ -345,6 +345,7 @@ possible_common_cc_flags = [
         '-Werror=shift-count-overflow',
         '-Werror=shift-overflow=2',
         '-Werror=undef',
+        '-Werror=unused-function',
         '-Wfloat-equal',
         '-Wimplicit-fallthrough=5',
         '-Winit-self',
@@ -1781,6 +1782,34 @@ if conf.get('HAVE_LIBCRYPTSETUP_PLUGINS') == 1
                         dependencies : libshared_deps + [libcryptsetup, versiondep],
                         link_with : [libshared],
                         link_whole : [cryptsetup_token_systemd_tpm2_static],
+                        link_depends : cryptsetup_token_sym,
+                        install_rpath : rootlibexecdir,
+                        install : true,
+                        install_dir : libcryptsetup_plugins_dir)
+        endif
+
+        if conf.get('HAVE_LIBFIDO2') == 1
+                cryptsetup_token_systemd_fido2 = shared_library(
+                        'cryptsetup-token-systemd-fido2',
+                        link_args : ['-shared',
+                                     '-Wl,--version-script=' + cryptsetup_token_sym_path],
+                        dependencies : libshared_deps + [libcryptsetup, versiondep],
+                        link_with : [libshared],
+                        link_whole : [cryptsetup_token_systemd_fido2_static],
+                        link_depends : cryptsetup_token_sym,
+                        install_rpath : rootlibexecdir,
+                        install : true,
+                        install_dir : libcryptsetup_plugins_dir)
+        endif
+
+        if conf.get('HAVE_P11KIT') == 1
+                cryptsetup_token_systemd_pkcs11 = shared_library(
+                        'cryptsetup-token-systemd-pkcs11',
+                        link_args : ['-shared',
+                                     '-Wl,--version-script=' + cryptsetup_token_sym_path],
+                        dependencies : libshared_deps + [libcryptsetup, versiondep],
+                        link_with : [libshared],
+                        link_whole : [cryptsetup_token_systemd_pkcs11_static],
                         link_depends : cryptsetup_token_sym,
                         install_rpath : rootlibexecdir,
                         install : true,
@@ -3801,7 +3830,7 @@ summary({
 # LDFLAGS:  ${OUR_LDFLAGS} ${LDFLAGS}
 
 if conf.get('ENABLE_EFI') == 1
-        summary({'efi arch' : efi_arch},
+        summary({'EFI arch' : efi_arch},
                 section : 'Extensible Firmware Interface')
 
         if have_gnu_efi

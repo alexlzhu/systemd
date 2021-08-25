@@ -215,9 +215,7 @@ static int acquire_existing_password(
                 if (r < 0)
                         return log_error_errno(r, "Failed to store password: %m");
 
-                string_erase(e);
-                assert_se(unsetenv("PASSWORD") == 0);
-
+                assert_se(unsetenv_erase("PASSWORD") >= 0);
                 return 1;
         }
 
@@ -273,9 +271,7 @@ static int acquire_token_pin(
                 if (r < 0)
                         return log_error_errno(r, "Failed to store token PIN: %m");
 
-                string_erase(e);
-                assert_se(unsetenv("PIN") == 0);
-
+                assert_se(unsetenv_erase("PIN") >= 0);
                 return 1;
         }
 
@@ -821,14 +817,13 @@ static int apply_identity_changes(JsonVariant **_v) {
 
         if (arg_identity_extra_this_machine || !strv_isempty(arg_identity_filter)) {
                 _cleanup_(json_variant_unrefp) JsonVariant *per_machine = NULL, *mmid = NULL;
-                char mids[SD_ID128_STRING_MAX];
                 sd_id128_t mid;
 
                 r = sd_id128_get_machine(&mid);
                 if (r < 0)
                         return log_error_errno(r, "Failed to acquire machine ID: %m");
 
-                r = json_variant_new_string(&mmid, sd_id128_to_string(mid, mids));
+                r = json_variant_new_string(&mmid, SD_ID128_TO_STRING(mid));
                 if (r < 0)
                         return log_error_errno(r, "Failed to allocate matchMachineId object: %m");
 
@@ -1097,8 +1092,7 @@ static int acquire_new_password(
                 if (r < 0)
                         return log_error_errno(r, "Failed to store password: %m");
 
-                string_erase(e);
-                assert_se(unsetenv("NEWPASSWORD") == 0);
+                assert_se(unsetenv_erase("NEWPASSWORD") >= 0);
 
                 if (ret)
                         *ret = TAKE_PTR(copy);

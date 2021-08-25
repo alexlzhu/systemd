@@ -74,4 +74,22 @@ static inline void FileHandleClosep(EFI_FILE_HANDLE *handle) {
 #define UINT64_MAX ((UINT64) -1)
 #endif
 
+VOID log_error_stall(const CHAR16 *fmt, ...);
 EFI_STATUS log_oom(void);
+
+/* This works just like log_error_errno() from userspace, but requires you
+ * to provide err a second time if you want to use %r in the message! */
+#define log_error_status_stall(err, fmt, ...) \
+        ({ \
+                log_error_stall(fmt, ##__VA_ARGS__); \
+                err; \
+        })
+
+VOID *memmem_safe(const VOID *haystack, UINTN haystack_len, const VOID *needle, UINTN needle_len);
+
+static inline VOID *mempmem_safe(const VOID *haystack, UINTN haystack_len, const VOID *needle, UINTN needle_len) {
+        CHAR8 *p = memmem_safe(haystack, haystack_len, needle, needle_len);
+        return p ? p + needle_len : NULL;
+}
+
+VOID print_at(UINTN x, UINTN y, UINTN attr, const CHAR16 *str);

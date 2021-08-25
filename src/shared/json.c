@@ -447,9 +447,7 @@ int json_variant_new_hex(JsonVariant **ret, const void *p, size_t n) {
 }
 
 int json_variant_new_id128(JsonVariant **ret, sd_id128_t id) {
-        char s[SD_ID128_STRING_MAX];
-
-        return json_variant_new_string(ret, sd_id128_to_string(id, s));
+        return json_variant_new_string(ret, SD_ID128_TO_STRING(id));
 }
 
 static void json_variant_set(JsonVariant *a, JsonVariant *b) {
@@ -3650,17 +3648,17 @@ int json_buildv(JsonVariant **ret, va_list ap) {
                 }
 
                 case _JSON_BUILD_ID128: {
-                        sd_id128_t id;
+                        const sd_id128_t *id;
 
                         if (!IN_SET(current->expect, EXPECT_TOPLEVEL, EXPECT_OBJECT_VALUE, EXPECT_ARRAY_ELEMENT)) {
                                 r = -EINVAL;
                                 goto finish;
                         }
 
-                        id = va_arg(ap, sd_id128_t);
+                        assert_se(id = va_arg(ap, sd_id128_t*));
 
                         if (current->n_suppress == 0) {
-                                r = json_variant_new_id128(&add, id);
+                                r = json_variant_new_id128(&add, *id);
                                 if (r < 0)
                                         goto finish;
                         }

@@ -400,25 +400,21 @@ int network_load_one(Manager *manager, OrderedHashmap **networks, const char *fi
                 .ipv4_accept_local = -1,
                 .ipv4_route_localnet = -1,
                 .ipv6_privacy_extensions = IPV6_PRIVACY_EXTENSIONS_NO,
-                .ipv6_accept_ra = -1,
                 .ipv6_dad_transmits = -1,
                 .ipv6_hop_limit = -1,
                 .ipv6_proxy_ndp = -1,
                 .proxy_arp = -1,
 
+                .ipv6_accept_ra = -1,
                 .ipv6_accept_ra_use_dns = true,
                 .ipv6_accept_ra_use_autonomous_prefix = true,
                 .ipv6_accept_ra_use_onlink_prefix = true,
+                .ipv6_accept_ra_use_mtu = true,
                 .ipv6_accept_ra_route_table = RT_TABLE_MAIN,
                 .ipv6_accept_ra_route_metric = DHCP_ROUTE_METRIC,
                 .ipv6_accept_ra_start_dhcp6_client = IPV6_ACCEPT_RA_START_DHCP6_CLIENT_YES,
 
-                .can_triple_sampling = -1,
-                .can_berr_reporting = -1,
                 .can_termination = -1,
-                .can_listen_only = -1,
-                .can_fd_mode = -1,
-                .can_non_iso = -1,
         };
 
         r = config_parse_many(
@@ -585,6 +581,7 @@ static Network *network_free(Network *network) {
         free(network->dhcp_mudurl);
         strv_free(network->dhcp_user_class);
         free(network->dhcp_hostname);
+        free(network->dhcp_label);
         set_free(network->dhcp_deny_listed_ip);
         set_free(network->dhcp_allow_listed_ip);
         set_free(network->dhcp_request_options);
@@ -604,12 +601,12 @@ static Network *network_free(Network *network) {
 
         ordered_set_free(network->router_search_domains);
         free(network->router_dns);
-        set_free_free(network->ndisc_deny_listed_router);
-        set_free_free(network->ndisc_allow_listed_router);
-        set_free_free(network->ndisc_deny_listed_prefix);
-        set_free_free(network->ndisc_allow_listed_prefix);
-        set_free_free(network->ndisc_deny_listed_route_prefix);
-        set_free_free(network->ndisc_allow_listed_route_prefix);
+        set_free(network->ndisc_deny_listed_router);
+        set_free(network->ndisc_allow_listed_router);
+        set_free(network->ndisc_deny_listed_prefix);
+        set_free(network->ndisc_allow_listed_prefix);
+        set_free(network->ndisc_deny_listed_route_prefix);
+        set_free(network->ndisc_allow_listed_route_prefix);
 
         free(network->batadv_name);
         free(network->bridge_name);
@@ -719,7 +716,8 @@ bool network_has_static_ipv6_configurations(Network *network) {
         return false;
 }
 
-int config_parse_stacked_netdev(const char *unit,
+int config_parse_stacked_netdev(
+                const char *unit,
                 const char *filename,
                 unsigned line,
                 const char *section,
@@ -729,6 +727,7 @@ int config_parse_stacked_netdev(const char *unit,
                 const char *rvalue,
                 void *data,
                 void *userdata) {
+
         _cleanup_free_ char *name = NULL;
         NetDevKind kind = ltype;
         Hashmap **h = data;
@@ -859,26 +858,26 @@ int config_parse_hostname(
                 void *data,
                 void *userdata) {
 
-        _cleanup_free_ char *hn = NULL;
         char **hostname = data;
         int r;
 
         assert(filename);
         assert(lvalue);
         assert(rvalue);
-        assert(hostname);
+        assert(data);
 
-        r = config_parse_string(unit, filename, line, section, section_line, lvalue, ltype, rvalue, &hn, userdata);
-        if (r < 0)
-                return r;
+        if (isempty(rvalue)) {
+                *hostname = mfree(*hostname);
+                return 0;
+        }
 
-        if (!hostname_is_valid(hn, 0)) {
+        if (!hostname_is_valid(rvalue, 0)) {
                 log_syntax(unit, LOG_WARNING, filename, line, 0,
                            "Hostname is not valid, ignoring assignment: %s", rvalue);
                 return 0;
         }
 
-        r = dns_name_is_valid(hn);
+        r = dns_name_is_valid(rvalue);
         if (r < 0) {
                 log_syntax(unit, LOG_WARNING, filename, line, r,
                            "Failed to check validity of hostname '%s', ignoring assignment: %m", rvalue);
@@ -890,7 +889,7 @@ int config_parse_hostname(
                 return 0;
         }
 
-        return free_and_replace(*hostname, hn);
+        return free_and_strdup_warn(hostname, rvalue);
 }
 
 int config_parse_timezone(
@@ -905,26 +904,27 @@ int config_parse_timezone(
                 void *data,
                 void *userdata) {
 
-        _cleanup_free_ char *tz = NULL;
-        char **datap = data;
+        char **tz = data;
         int r;
 
         assert(filename);
         assert(lvalue);
         assert(rvalue);
-        assert(datap);
+        assert(data);
 
-        r = config_parse_string(unit, filename, line, section, section_line, lvalue, ltype, rvalue, &tz, userdata);
-        if (r < 0)
-                return r;
+        if (isempty(rvalue)) {
+                *tz = mfree(*tz);
+                return 0;
+        }
 
-        if (!timezone_is_valid(tz, LOG_WARNING)) {
-                log_syntax(unit, LOG_WARNING, filename, line, 0,
+        r = verify_timezone(rvalue, LOG_WARNING);
+        if (r < 0) {
+                log_syntax(unit, LOG_WARNING, filename, line, r,
                            "Timezone is not valid, ignoring assignment: %s", rvalue);
                 return 0;
         }
 
-        return free_and_replace(*datap, tz);
+        return free_and_strdup_warn(tz, rvalue);
 }
 
 int config_parse_dns(

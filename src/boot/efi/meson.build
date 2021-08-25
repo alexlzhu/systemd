@@ -2,7 +2,6 @@
 
 efi_headers = files('''
         console.h
-        crc32.h
         disk.h
         graphics.h
         linux.h
@@ -17,6 +16,7 @@ efi_headers = files('''
 '''.split())
 
 common_sources = '''
+        assert.c
         disk.c
         graphics.c
         measure.c
@@ -28,7 +28,6 @@ common_sources = '''
 systemd_boot_sources = '''
         boot.c
         console.c
-        crc32.c
         random-seed.c
         sha256.c
         shim.c
@@ -101,6 +100,13 @@ if have_gnu_efi
         efi_conf.set_quoted('EFI_MACHINE_TYPE_NAME', EFI_MACHINE_TYPE_NAME)
         efi_conf.set10('ENABLE_TPM', get_option('tpm'))
         efi_conf.set('SD_TPM_PCR', get_option('tpm-pcrindex'))
+
+        foreach ctype : ['color-normal', 'color-entry', 'color-highlight', 'color-edit']
+                c = get_option('efi-' + ctype).split(',')
+                fg = 'EFI_' + c[0].strip().underscorify().to_upper()
+                bg = 'EFI_BACKGROUND_' + c[1].strip().underscorify().to_upper()
+                efi_conf.set(ctype.underscorify().to_upper(), '(' + fg + '|' + bg + ')')
+        endforeach
 
         if get_option('sbat-distro') != ''
                 efi_conf.set_quoted('SBAT_PROJECT', meson.project_name())
@@ -219,11 +225,15 @@ if have_gnu_efi
                 compile_args += ['-Werror']
         endif
         if get_option('buildtype') == 'debug'
-                compile_args += ['-ggdb', '-O0']
+                compile_args += ['-ggdb', '-O0', '-DEFI_DEBUG']
         elif get_option('buildtype') == 'debugoptimized'
-                compile_args += ['-ggdb', '-Og']
+                compile_args += ['-ggdb', '-Og', '-DEFI_DEBUG']
         else
                 compile_args += ['-O2']
+        endif
+        if get_option('b_ndebug') == 'true' or (
+           get_option('b_ndebug') == 'if-release' and ['plain', 'release'].contains(get_option('buildtype')))
+                compile_args += ['-DNDEBUG']
         endif
 
         efi_ldflags = ['-T', efi_lds,
@@ -287,6 +297,7 @@ if have_gnu_efi
                                    '-j', '.text',
                                    '-j', '.sdata',
                                    '-j', '.sbat',
+                                   '-j', '.sdmagic',
                                    '-j', '.data',
                                    '-j', '.dynamic',
                                    '-j', '.dynsym',

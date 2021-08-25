@@ -188,6 +188,8 @@ tests += [
 
         [['src/test/test-util.c']],
 
+        [['src/test/test-macro.c']],
+
         [['src/test/test-json.c']],
 
         [['src/test/test-modhex.c']],
@@ -214,6 +216,8 @@ tests += [
         [['src/test/test-glob-util.c']],
 
         [['src/test/test-fs-util.c']],
+
+        [['src/test/test-install-file.c']],
 
         [['src/test/test-umask-util.c']],
 

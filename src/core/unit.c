@@ -766,6 +766,12 @@ Unit* unit_free(Unit *u) {
 
         bpf_program_unref(u->bpf_device_control_installed);
 
+#if BPF_FRAMEWORK
+        bpf_link_free(u->restrict_ifaces_ingress_bpf_link);
+        bpf_link_free(u->restrict_ifaces_egress_bpf_link);
+#endif
+        fdset_free(u->initial_restric_ifaces_link_fds);
+
         condition_free_list(u->conditions);
         condition_free_list(u->asserts);
 
@@ -3053,6 +3059,9 @@ int unit_add_dependency(
                 return 0;
         }
 
+        if (u->manager && FLAGS_SET(u->manager->test_run_flags, MANAGER_TEST_RUN_IGNORE_DEPENDENCIES))
+                return 0;
+
         /* Note that ordering a device unit after a unit is permitted since it allows to start its job
          * running timeout at a specific time. */
         if (FLAGS_SET(a, UNIT_ATOM_BEFORE) && other->type == UNIT_DEVICE) {
@@ -3176,6 +3185,9 @@ int unit_add_dependency_by_name(Unit *u, UnitDependency d, const char *name, boo
         if (r < 0)
                 return r;
 
+        if (u->manager && FLAGS_SET(u->manager->test_run_flags, MANAGER_TEST_RUN_IGNORE_DEPENDENCIES))
+                return 0;
+
         r = manager_load_unit(u->manager, name, NULL, NULL, &other);
         if (r < 0)
                 return r;
@@ -3194,6 +3206,9 @@ int unit_add_two_dependencies_by_name(Unit *u, UnitDependency d, UnitDependency 
         r = resolve_template(u, name, &buf, &name);
         if (r < 0)
                 return r;
+
+        if (u->manager && FLAGS_SET(u->manager->test_run_flags, MANAGER_TEST_RUN_IGNORE_DEPENDENCIES))
+                return 0;
 
         r = manager_load_unit(u->manager, name, NULL, NULL, &other);
         if (r < 0)
@@ -3311,6 +3326,9 @@ int unit_set_default_slice(Unit *u) {
         int r;
 
         assert(u);
+
+        if (u->manager && FLAGS_SET(u->manager->test_run_flags, MANAGER_TEST_RUN_IGNORE_DEPENDENCIES))
+                return 0;
 
         if (UNIT_GET_SLICE(u))
                 return 0;
@@ -3576,7 +3594,6 @@ int unit_add_blockdev_dependency(Unit *u, const char *what, UnitDependencyMask m
 int unit_coldplug(Unit *u) {
         int r = 0, q;
         char **i;
-        Job *uj;
 
         assert(u);
 
@@ -3599,9 +3616,13 @@ int unit_coldplug(Unit *u) {
                         r = q;
         }
 
-        uj = u->job ?: u->nop_job;
-        if (uj) {
-                q = job_coldplug(uj);
+        if (u->job) {
+                q = job_coldplug(u->job);
+                if (q < 0 && r >= 0)
+                        r = q;
+        }
+        if (u->nop_job) {
+                q = job_coldplug(u->nop_job);
                 if (q < 0 && r >= 0)
                         r = q;
         }

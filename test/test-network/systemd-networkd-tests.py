@@ -1183,6 +1183,25 @@ class NetworkdNetDevTests(unittest.TestCase, Utilities):
                 self.assertRegex(output, ' mtu 2000 ')
                 self.assertRegex(output, 'macvlan mode ' + mode + ' ')
 
+                rc = call("ip link del test1")
+                self.assertEqual(rc, 0)
+                time.sleep(1)
+
+                rc = call("ip link add test1 type dummy")
+                self.assertEqual(rc, 0)
+                time.sleep(1)
+
+                self.wait_online(['macvlan99:degraded', 'test1:degraded'])
+
+                output = check_output('ip -d link show test1')
+                print(output)
+                self.assertRegex(output, ' mtu 2000 ')
+
+                output = check_output('ip -d link show macvlan99')
+                print(output)
+                self.assertRegex(output, ' mtu 2000 ')
+                self.assertRegex(output, 'macvlan mode ' + mode + ' ')
+
     @expectedFailureIfModuleIsNotAvailable('ipvlan')
     def test_ipvlan(self):
         for mode, flag in [['L2', 'private'], ['L3', 'vepa'], ['L3S', 'bridge']]:
@@ -2318,6 +2337,7 @@ class NetworkdNetworkTests(unittest.TestCase, Utilities):
         print(output)
         self.assertIn('2001:1234:5:8fff:ff:ff:ff:ff proto static', output)
         self.assertIn('2001:1234:5:8f63::1 proto kernel', output)
+        self.assertIn('2001:1234:5:afff:ff:ff:ff:ff via fe80:0:222:4dff:ff:ff:ff:ff proto static', output)
 
         print('### ip -6 route show default')
         output = check_output('ip -6 route show default')
@@ -2966,6 +2986,7 @@ class NetworkdNetworkTests(unittest.TestCase, Utilities):
             self.assertIn('id 3 dev veth99', output)
             self.assertIn('id 4 dev veth99', output)
             self.assertRegex(output, 'id 5 via 192.168.10.1 dev veth99 .*onlink')
+            self.assertIn('id 8 via fe80:0:222:4dff:ff:ff:ff:ff dev veth99', output)
             self.assertRegex(output, r'id [0-9]* via 192.168.5.2 dev veth99')
 
             output = check_output('ip nexthop list dev dummy98')
@@ -3700,7 +3721,7 @@ class NetworkdBridgeTests(unittest.TestCase, Utilities):
 
         output = check_output('ip rule list table 100')
         print(output)
-        self.assertIn('0:	from all to 8.8.8.8 lookup 100', output)
+        self.assertIn('from all to 8.8.8.8 lookup 100', output)
 
 class NetworkdLLDPTests(unittest.TestCase, Utilities):
     links = ['veth99']
@@ -3910,6 +3931,7 @@ class NetworkdDHCPClientTests(unittest.TestCase, Utilities):
         '25-veth.netdev',
         '25-vrf.netdev',
         '25-vrf.network',
+        'dhcp-client-allow-list.network',
         'dhcp-client-anonymize.network',
         'dhcp-client-decline.network',
         'dhcp-client-gateway-ipv4.network',
@@ -4131,6 +4153,7 @@ class NetworkdDHCPClientTests(unittest.TestCase, Utilities):
         self.assertRegex(output, '12:34:56:78:9a:bc')
         self.assertRegex(output, '192.168.5')
         self.assertRegex(output, '1492')
+        self.assertRegex(output, 'test-label')
 
         print('## ip route show table main dev veth99')
         output = check_output('ip route show table main dev veth99')
@@ -4742,6 +4765,16 @@ class NetworkdDHCPClientTests(unittest.TestCase, Utilities):
         print(output)
         self.assertRegex(output, 'inet 192.168.5.[0-9]*/24 metric 1024 brd 192.168.5.255 scope global dynamic veth99')
 
+    def test_dhcp_client_allow_list(self):
+        copy_unit_to_networkd_unit_path('25-veth.netdev', 'dhcp-server-decline.network', 'dhcp-client-allow-list.network')
+
+        start_networkd()
+        self.wait_online(['veth99:routable', 'veth-peer:routable'])
+
+        output = check_output('ip -4 address show dev veth99 scope global dynamic')
+        print(output)
+        self.assertRegex(output, 'inet 192.168.5.[0-9]*/24 metric 1024 brd 192.168.5.255 scope global dynamic veth99')
+
 class NetworkdIPv6PrefixTests(unittest.TestCase, Utilities):
     links = [
         'dummy98',
@@ -4778,18 +4811,22 @@ class NetworkdIPv6PrefixTests(unittest.TestCase, Utilities):
         print(output)
         self.assertIn('inet6 2001:db8:0:1:', output)
         self.assertNotIn('inet6 2001:db8:0:2:', output)
+        self.assertNotIn('inet6 2001:db8:0:3:', output)
 
         output = check_output('ip -6 route show dev veth-peer')
         print(output)
         self.assertIn('2001:db8:0:1::/64 proto ra', output)
         self.assertNotIn('2001:db8:0:2::/64 proto ra', output)
+        self.assertNotIn('2001:db8:0:3::/64 proto ra', output)
         self.assertIn('2001:db0:fff::/64 via ', output)
         self.assertNotIn('2001:db1:fff::/64 via ', output)
+        self.assertNotIn('2001:db2:fff::/64 via ', output)
 
         output = check_output('ip address show dev veth99')
         print(output)
         self.assertNotIn('inet6 2001:db8:0:1:', output)
         self.assertIn('inet6 2001:db8:0:2:', output)
+        self.assertNotIn('inet6 2001:db8:0:3:', output)
 
         output = check_output(*resolvectl_cmd, 'dns', 'veth-peer', env=env)
         print(output)

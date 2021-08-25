@@ -1581,12 +1581,8 @@ static int context_load_partition_table(
          * /proc/self/fd/ magic path if we have an existing fd. Open the original file otherwise. */
         if (*backing_fd < 0)
                 r = fdisk_assign_device(c, node, arg_dry_run);
-        else {
-                char procfs_path[STRLEN("/proc/self/fd/") + DECIMAL_STR_MAX(int)];
-                xsprintf(procfs_path, "/proc/self/fd/%i", *backing_fd);
-
-                r = fdisk_assign_device(c, procfs_path, arg_dry_run);
-        }
+        else
+                r = fdisk_assign_device(c, FORMAT_PROC_FD_PATH(*backing_fd), arg_dry_run);
         if (r == -EINVAL && arg_size_auto) {
                 struct stat st;
 
@@ -2119,7 +2115,6 @@ static void context_bar_char_process_partition(
 
 static int partition_hint(const Partition *p, const char *node, char **ret) {
         _cleanup_free_ char *buf = NULL;
-        char ids[ID128_UUID_STRING_MAX];
         const char *label;
         sd_id128_t id;
 
@@ -2148,7 +2143,7 @@ static int partition_hint(const Partition *p, const char *node, char **ret) {
         else
                 id = p->type_uuid;
 
-        buf = strdup(id128_to_uuid_string(id, ids));
+        buf = strdup(ID128_TO_UUID_STRING(id));
 
 done:
         if (!buf)
@@ -2548,7 +2543,6 @@ static int partition_encrypt(
         _cleanup_(sym_crypt_freep) struct crypt_device *cd = NULL;
         _cleanup_(erase_and_freep) void *volume_key = NULL;
         _cleanup_free_ char *dm_name = NULL, *vol = NULL;
-        char suuid[ID128_UUID_STRING_MAX];
         size_t volume_key_size = 256 / 8;
         sd_id128_t uuid;
         int r;
@@ -2595,7 +2589,7 @@ static int partition_encrypt(
                          CRYPT_LUKS2,
                          "aes",
                          "xts-plain64",
-                         id128_to_uuid_string(uuid, suuid),
+                         ID128_TO_UUID_STRING(uuid),
                          volume_key,
                          volume_key_size,
                          &(struct crypt_params_luks2) {
@@ -3344,11 +3338,9 @@ static int context_mangle_partitions(Context *context) {
                         }
 
                         if (!sd_id128_equal(p->new_uuid, p->current_uuid)) {
-                                char buf[ID128_UUID_STRING_MAX];
-
                                 assert(!sd_id128_is_null(p->new_uuid));
 
-                                r = fdisk_partition_set_uuid(p->current_partition, id128_to_uuid_string(p->new_uuid, buf));
+                                r = fdisk_partition_set_uuid(p->current_partition, ID128_TO_UUID_STRING(p->new_uuid));
                                 if (r < 0)
                                         return log_error_errno(r, "Failed to set partition UUID: %m");
 
@@ -3375,7 +3367,6 @@ static int context_mangle_partitions(Context *context) {
                 } else {
                         _cleanup_(fdisk_unref_partitionp) struct fdisk_partition *q = NULL;
                         _cleanup_(fdisk_unref_parttypep) struct fdisk_parttype *t = NULL;
-                        char ids[ID128_UUID_STRING_MAX];
 
                         assert(!p->new_partition);
                         assert(p->offset % 512 == 0);
@@ -3387,7 +3378,7 @@ static int context_mangle_partitions(Context *context) {
                         if (!t)
                                 return log_oom();
 
-                        r = fdisk_parttype_set_typestr(t, id128_to_uuid_string(p->type_uuid, ids));
+                        r = fdisk_parttype_set_typestr(t, ID128_TO_UUID_STRING(p->type_uuid));
                         if (r < 0)
                                 return log_error_errno(r, "Failed to initialize partition type: %m");
 
@@ -3415,7 +3406,7 @@ static int context_mangle_partitions(Context *context) {
                         if (r < 0)
                                 return log_error_errno(r, "Failed to set partition number: %m");
 
-                        r = fdisk_partition_set_uuid(q, id128_to_uuid_string(p->new_uuid, ids));
+                        r = fdisk_partition_set_uuid(q, ID128_TO_UUID_STRING(p->new_uuid));
                         if (r < 0)
                                 return log_error_errno(r, "Failed to set partition UUID: %m");
 
@@ -4593,7 +4584,6 @@ static int find_root(char **ret, int *ret_fd) {
 }
 
 static int resize_pt(int fd) {
-        char procfs_path[STRLEN("/proc/self/fd/") + DECIMAL_STR_MAX(int)];
         _cleanup_(fdisk_unref_contextp) struct fdisk_context *c = NULL;
         int r;
 
@@ -4605,14 +4595,13 @@ static int resize_pt(int fd) {
         if (!c)
                 return log_oom();
 
-        xsprintf(procfs_path, "/proc/self/fd/%i", fd);
-        r = fdisk_assign_device(c, procfs_path, 0);
+        r = fdisk_assign_device(c, FORMAT_PROC_FD_PATH(fd), 0);
         if (r < 0)
-                return log_error_errno(r, "Failed to open device '%s': %m", procfs_path);
+                return log_error_errno(r, "Failed to open device '%s': %m", FORMAT_PROC_FD_PATH(fd));
 
         r = fdisk_has_label(c);
         if (r < 0)
-                return log_error_errno(r, "Failed to determine whether disk '%s' has a disk label: %m", procfs_path);
+                return log_error_errno(r, "Failed to determine whether disk '%s' has a disk label: %m", FORMAT_PROC_FD_PATH(fd));
         if (r == 0) {
                 log_debug("Not resizing partition table, as there currently is none.");
                 return 0;

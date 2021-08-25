@@ -17,6 +17,8 @@ static VOID linux_efi_handover(EFI_HANDLE image, struct boot_params *params) {
         handover_f handover;
         UINTN start = (UINTN)params->hdr.code32_start;
 
+        assert(params);
+
 #ifdef __x86_64__
         asm volatile ("cli");
         start += 512;
@@ -25,7 +27,7 @@ static VOID linux_efi_handover(EFI_HANDLE image, struct boot_params *params) {
         handover(image, ST, params);
 }
 
-EFI_STATUS linux_exec(EFI_HANDLE *image,
+EFI_STATUS linux_exec(EFI_HANDLE image,
                       CHAR8 *cmdline, UINTN cmdline_len,
                       UINTN linux_addr,
                       UINTN initrd_addr, UINTN initrd_size) {
@@ -34,6 +36,9 @@ EFI_STATUS linux_exec(EFI_HANDLE *image,
         UINT8 setup_sectors;
         EFI_PHYSICAL_ADDRESS addr;
         EFI_STATUS err;
+
+        assert(image);
+        assert(cmdline);
 
         image_params = (struct boot_params *) linux_addr;
 
