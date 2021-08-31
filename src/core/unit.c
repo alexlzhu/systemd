@@ -1727,7 +1727,7 @@ static bool unit_test_condition(Unit *u) {
         r = manager_get_effective_environment(u->manager, &env);
         if (r < 0) {
                 log_unit_error_errno(u, r, "Failed to determine effective environment: %m");
-                u->condition_result = CONDITION_ERROR;
+                u->condition_result = true;
         } else
                 u->condition_result = condition_test_list(
                                 u->conditions,
@@ -1856,6 +1856,13 @@ int unit_start(Unit *u) {
         Unit *following;
 
         assert(u);
+
+        /* Check start rate limiting early so that failure conditions don't cause us to enter a busy loop. */
+        if (UNIT_VTABLE(u)->test_start_limit) {
+                int r = UNIT_VTABLE(u)->test_start_limit(u);
+                if (r < 0)
+                        return r;
+        }
 
         /* If this is already started, then this will succeed. Note that this will even succeed if this unit
          * is not startable by the user. This is relied on to detect when we need to wait for units and when
@@ -5839,6 +5846,25 @@ int unit_freeze_vtable_common(Unit *u) {
 
 int unit_thaw_vtable_common(Unit *u) {
         return unit_cgroup_freezer_action(u, FREEZER_THAW);
+}
+
+Condition *unit_find_failed_condition(Unit *u) {
+        Condition *c, *failed_trigger = NULL;
+        bool has_succeeded_trigger = false;
+
+        if (u->condition_result)
+                return NULL;
+
+        LIST_FOREACH(conditions, c, u->conditions)
+                if (c->trigger) {
+                        if (c->result == CONDITION_SUCCEEDED)
+                                 has_succeeded_trigger = true;
+                        else if (!failed_trigger)
+                                 failed_trigger = c;
+                } else if (c->result != CONDITION_SUCCEEDED)
+                        return c;
+
+        return failed_trigger && !has_succeeded_trigger ? failed_trigger : NULL;
 }
 
 static const char* const collect_mode_table[_COLLECT_MODE_MAX] = {

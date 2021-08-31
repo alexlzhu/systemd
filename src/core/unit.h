@@ -658,6 +658,10 @@ typedef struct UnitVTable {
          * of this type will immediately fail. */
         bool (*supported)(void);
 
+        /* If this function is set, it's invoked first as part of starting a unit to allow start rate
+         * limiting checks to occur before we do anything else. */
+        int (*test_start_limit)(Unit *u);
+
         /* The strings to print in status messages */
         UnitStatusMessageFormats status_message_formats;
 
@@ -979,6 +983,8 @@ void unit_thawed(Unit *u);
 
 int unit_freeze_vtable_common(Unit *u);
 int unit_thaw_vtable_common(Unit *u);
+
+Condition *unit_find_failed_condition(Unit *u);
 
 /* Macros which append UNIT= or USER_UNIT= to the message */
 
