@@ -91,15 +91,20 @@ static bool arg_man = true;
 static bool arg_generators = false;
 static char *arg_root = NULL;
 static char *arg_image = NULL;
+static char *arg_security_policy = NULL;
 static bool arg_offline = false;
 static unsigned arg_threshold = 100;
 static unsigned arg_iterations = 1;
 static usec_t arg_base_time = USEC_INFINITY;
+static char *arg_unit = NULL;
+static JsonFormatFlags arg_json_format_flags = JSON_FORMAT_OFF;
 
 STATIC_DESTRUCTOR_REGISTER(arg_dot_from_patterns, strv_freep);
 STATIC_DESTRUCTOR_REGISTER(arg_dot_to_patterns, strv_freep);
 STATIC_DESTRUCTOR_REGISTER(arg_root, freep);
 STATIC_DESTRUCTOR_REGISTER(arg_image, freep);
+STATIC_DESTRUCTOR_REGISTER(arg_security_policy, freep);
+STATIC_DESTRUCTOR_REGISTER(arg_unit, freep);
 
 typedef struct BootTimes {
         usec_t firmware_time;
@@ -2145,7 +2150,7 @@ static int service_watchdogs(int argc, char *argv[], void *userdata) {
 }
 
 static int do_condition(int argc, char *argv[], void *userdata) {
-        return verify_conditions(strv_skip(argv, 1), arg_scope);
+        return verify_conditions(strv_skip(argv, 1), arg_scope, arg_unit, arg_root);
 }
 
 static int do_verify(int argc, char *argv[], void *userdata) {
@@ -2154,7 +2159,9 @@ static int do_verify(int argc, char *argv[], void *userdata) {
 
 static int do_security(int argc, char *argv[], void *userdata) {
         _cleanup_(sd_bus_flush_close_unrefp) sd_bus *bus = NULL;
+        _cleanup_(json_variant_unrefp) JsonVariant *policy = NULL;
         int r;
+        unsigned line, column;
 
         r = acquire_bus(&bus, NULL);
         if (r < 0)
@@ -2162,7 +2169,37 @@ static int do_security(int argc, char *argv[], void *userdata) {
 
         (void) pager_open(arg_pager_flags);
 
-        return analyze_security(bus, strv_skip(argv, 1), arg_scope, arg_man, arg_generators, arg_offline, arg_threshold, arg_root, 0);
+        if (arg_security_policy) {
+                r = json_parse_file(/*f=*/ NULL, arg_security_policy, /*flags=*/ 0, &policy, &line, &column);
+                if (r < 0)
+                        return log_error_errno(r, "Failed to parse '%s' at %u:%u: %m", arg_security_policy, line, column);
+        } else {
+                _cleanup_fclose_ FILE *f = NULL;
+                _cleanup_free_ char *pp = NULL;
+
+                r = search_and_fopen_nulstr("systemd-analyze-security.policy", "re", /*root=*/ NULL, CONF_PATHS_NULSTR("systemd"), &f, &pp);
+                if (r < 0 && r != -ENOENT)
+                        return r;
+
+                if (f != NULL) {
+                        r = json_parse_file(f, pp, /*flags=*/ 0, &policy, &line, &column);
+                        if (r < 0)
+                                return log_error_errno(r, "[%s:%u:%u] Failed to parse JSON policy: %m", pp, line, column);
+                }
+        }
+
+        return analyze_security(bus,
+                                strv_skip(argv, 1),
+                                policy,
+                                arg_scope,
+                                arg_man,
+                                arg_generators,
+                                arg_offline,
+                                arg_threshold,
+                                arg_root,
+                                arg_json_format_flags,
+                                arg_pager_flags,
+                                /*flags=*/ 0);
 }
 
 static int help(int argc, char *argv[], void *userdata) {
@@ -2214,6 +2251,10 @@ static int help(int argc, char *argv[], void *userdata) {
                "     --threshold=N           Exit with a non-zero status when overall\n"
                "                             exposure level is over threshold value\n"
                "     --version               Show package version\n"
+               "     --security-policy=PATH  Use custom JSON security policy instead\n"
+               "                             of built-in one\n"
+               "     --json=pretty|short|off Generate JSON output of the security\n"
+               "                             analysis table\n"
                "     --no-pager              Do not pipe output into a pager\n"
                "     --system                Operate on system systemd instance\n"
                "     --user                  Operate on user systemd instance\n"
@@ -2266,6 +2307,8 @@ static int parse_argv(int argc, char *argv[]) {
                 ARG_RECURSIVE_ERRORS,
                 ARG_OFFLINE,
                 ARG_THRESHOLD,
+                ARG_SECURITY_POLICY,
+                ARG_JSON,
         };
 
         static const struct option options[] = {
@@ -2278,6 +2321,7 @@ static int parse_argv(int argc, char *argv[]) {
                 { "recursive-errors", required_argument, NULL, ARG_RECURSIVE_ERRORS },
                 { "offline",          required_argument, NULL, ARG_OFFLINE          },
                 { "threshold",        required_argument, NULL, ARG_THRESHOLD        },
+                { "security-policy",  required_argument, NULL, ARG_SECURITY_POLICY  },
                 { "system",           no_argument,       NULL, ARG_SYSTEM           },
                 { "user",             no_argument,       NULL, ARG_USER             },
                 { "global",           no_argument,       NULL, ARG_GLOBAL           },
@@ -2291,6 +2335,8 @@ static int parse_argv(int argc, char *argv[]) {
                 { "machine",          required_argument, NULL, 'M'                  },
                 { "iterations",       required_argument, NULL, ARG_ITERATIONS       },
                 { "base-time",        required_argument, NULL, ARG_BASE_TIME        },
+                { "unit",             required_argument, NULL, 'U'                  },
+                { "json",             required_argument, NULL, ARG_JSON             },
                 {}
         };
 
@@ -2299,7 +2345,7 @@ static int parse_argv(int argc, char *argv[]) {
         assert(argc >= 0);
         assert(argv);
 
-        while ((c = getopt_long(argc, argv, "hH:M:", options, NULL)) >= 0)
+        while ((c = getopt_long(argc, argv, "hH:M:U:", options, NULL)) >= 0)
                 switch (c) {
 
                 case 'h':
@@ -2409,6 +2455,18 @@ static int parse_argv(int argc, char *argv[]) {
 
                         break;
 
+                case ARG_SECURITY_POLICY:
+                        r = parse_path_argument(optarg, /* suppress_root= */ false, &arg_security_policy);
+                        if (r < 0)
+                                return r;
+                        break;
+
+                case ARG_JSON:
+                        r = parse_json_argument(optarg, &arg_json_format_flags);
+                        if (r <= 0)
+                                return r;
+                        break;
+
                 case ARG_ITERATIONS:
                         r = safe_atou(optarg, &arg_iterations);
                         if (r < 0)
@@ -2423,6 +2481,16 @@ static int parse_argv(int argc, char *argv[]) {
 
                         break;
 
+                case 'U': {
+                        _cleanup_free_ char *mangled = NULL;
+
+                        r = unit_name_mangle(optarg, UNIT_NAME_MANGLE_WARN, &mangled);
+                        if (r < 0)
+                                return log_error_errno(r, "Failed to mangle unit name %s: %m", optarg);
+
+                        free_and_replace(arg_unit, mangled);
+                        break;
+                }
                 case '?':
                         return -EINVAL;
 
@@ -2433,6 +2501,10 @@ static int parse_argv(int argc, char *argv[]) {
         if (arg_offline && !streq_ptr(argv[optind], "security"))
                 return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
                                        "Option --offline= is only supported for security right now.");
+
+        if (arg_json_format_flags != JSON_FORMAT_OFF && !streq_ptr(argv[optind], "security"))
+                return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                       "Option --json= is only supported for security right now.");
 
         if (arg_threshold != 100 && !streq_ptr(argv[optind], "security"))
                 return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
@@ -2447,14 +2519,27 @@ static int parse_argv(int argc, char *argv[]) {
                 return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
                                        "Option --user is not supported for cat-config right now.");
 
-        if ((arg_root || arg_image) && (!STRPTR_IN_SET(argv[optind], "cat-config", "verify")) &&
+        if (arg_security_policy && !streq_ptr(argv[optind], "security"))
+                return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                       "Option --security-policy= is only supported for security.");
+
+        if ((arg_root || arg_image) && (!STRPTR_IN_SET(argv[optind], "cat-config", "verify", "condition")) &&
            (!(streq_ptr(argv[optind], "security") && arg_offline)))
                 return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
-                                       "Options --root= and --image= are only supported for cat-config, verify and security when used with --offline= right now.");
+                                       "Options --root= and --image= are only supported for cat-config, verify, condition and security when used with --offline= right now.");
 
         /* Having both an image and a root is not supported by the code */
         if (arg_root && arg_image)
                 return log_error_errno(SYNTHETIC_ERRNO(EINVAL), "Please specify either --root= or --image=, the combination of both is not supported.");
+
+        if (arg_unit && !streq_ptr(argv[optind], "condition"))
+                return log_error_errno(SYNTHETIC_ERRNO(EINVAL), "Option --unit= is only supported for condition");
+
+        if (streq_ptr(argv[optind], "condition") && !arg_unit && optind >= argc - 1)
+                return log_error_errno(SYNTHETIC_ERRNO(EINVAL), "Too few arguments for condition");
+
+        if (streq_ptr(argv[optind], "condition") && arg_unit && optind < argc - 1)
+                return log_error_errno(SYNTHETIC_ERRNO(EINVAL), "No conditions can be passed if --unit= is used.");
 
         return 1; /* work to do */
 }
@@ -2486,7 +2571,7 @@ static int run(int argc, char *argv[]) {
                 { "exit-status",       VERB_ANY, VERB_ANY, 0,            dump_exit_status       },
                 { "syscall-filter",    VERB_ANY, VERB_ANY, 0,            dump_syscall_filters   },
                 { "capability",        VERB_ANY, VERB_ANY, 0,            dump_capabilities      },
-                { "condition",         2,        VERB_ANY, 0,            do_condition           },
+                { "condition",         VERB_ANY, VERB_ANY, 0,            do_condition           },
                 { "verify",            2,        VERB_ANY, 0,            do_verify              },
                 { "calendar",          2,        VERB_ANY, 0,            test_calendar          },
                 { "timestamp",         2,        VERB_ANY, 0,            test_timestamp         },

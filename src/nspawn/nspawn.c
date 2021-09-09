@@ -5345,7 +5345,7 @@ static int cant_be_in_netns(void) {
         if (fd < 0)
                 return log_error_errno(errno, "Failed to allocate udev control socket: %m");
 
-        if (connect(fd, &sa.un, SOCKADDR_UN_LEN(sa.un)) < 0) {
+        if (connect(fd, &sa.sa, SOCKADDR_UN_LEN(sa.un)) < 0) {
 
                 if (errno == ENOENT || ERRNO_IS_DISCONNECT(errno))
                         return log_error_errno(SYNTHETIC_ERRNO(EOPNOTSUPP),
@@ -5692,6 +5692,7 @@ static int run(int argc, char *argv[]) {
                                 arg_image,
                                 &arg_verity_settings,
                                 NULL,
+                                loop->diskseq,
                                 loop->uevent_seqnum_not_before,
                                 loop->timestamp_not_before,
                                 dissect_image_flags,

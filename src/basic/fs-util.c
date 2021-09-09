@@ -45,50 +45,39 @@ int unlink_noerrno(const char *path) {
 }
 
 int rmdir_parents(const char *path, const char *stop) {
-        size_t l;
-        int r = 0;
+        char *p;
+        int r;
 
         assert(path);
         assert(stop);
 
-        l = strlen(path);
+        if (!path_is_safe(path))
+                return -EINVAL;
 
-        /* Skip trailing slashes */
-        while (l > 0 && path[l-1] == '/')
-                l--;
+        if (!path_is_safe(stop))
+                return -EINVAL;
 
-        while (l > 0) {
-                char *t;
+        p = strdupa(path);
 
-                /* Skip last component */
-                while (l > 0 && path[l-1] != '/')
-                        l--;
+        for (;;) {
+                char *slash = NULL;
 
-                /* Skip trailing slashes */
-                while (l > 0 && path[l-1] == '/')
-                        l--;
-
-                if (l <= 0)
-                        break;
-
-                t = strndup(path, l);
-                if (!t)
-                        return -ENOMEM;
-
-                if (path_startswith(stop, t)) {
-                        free(t);
+                /* skip the last component. */
+                r = path_find_last_component(p, /* accept_dot_dot= */ false, (const char **) &slash, NULL);
+                if (r <= 0)
+                        return r;
+                if (slash == p)
                         return 0;
-                }
 
-                r = rmdir(t);
-                free(t);
+                assert(*slash == '/');
+                *slash = '\0';
 
-                if (r < 0)
-                        if (errno != ENOENT)
-                                return -errno;
+                if (path_startswith_full(stop, p, /* accept_dot_dot= */ false))
+                        return 0;
+
+                if (rmdir(p) < 0 && errno != ENOENT)
+                        return -errno;
         }
-
-        return 0;
 }
 
 int rename_noreplace(int olddirfd, const char *oldpath, int newdirfd, const char *newpath) {
@@ -375,7 +364,7 @@ int fd_warn_permissions(const char *path, int fd) {
 
 int touch_file(const char *path, bool parents, usec_t stamp, uid_t uid, gid_t gid, mode_t mode) {
         _cleanup_close_ int fd = -1;
-        int r, ret = 0;
+        int r, ret;
 
         assert(path);
 
@@ -412,11 +401,11 @@ int touch_file(const char *path, bool parents, usec_t stamp, uid_t uid, gid_t gi
 
                 timespec_store(&ts[0], stamp);
                 ts[1] = ts[0];
-                r = utimensat(AT_FDCWD, FORMAT_PROC_FD_PATH(fd), ts, 0);
+                r = futimens_opath(fd, ts);
         } else
-                r = utimensat(AT_FDCWD, FORMAT_PROC_FD_PATH(fd), NULL, 0);
+                r = futimens_opath(fd, NULL);
         if (r < 0 && ret >= 0)
-                return -errno;
+                return r;
 
         return ret;
 }

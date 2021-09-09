@@ -884,6 +884,11 @@ evdev:atkbd:dmi:bvn*:bvr*:svnLENOVO*:pn*IdeaPad*Z370*:*
  KEYBOARD_KEY_ae=!volumedown
  KEYBOARD_KEY_b0=!volumeup
 
+evdev:atkbd:dmi:bvn*:bvr*:svnLENOVO*:pn*IdeaPadFlex5*:*
+ KEYBOARD_KEY_a0=!mute
+ KEYBOARD_KEY_ae=!volumedown
+ KEYBOARD_KEY_b0=!volumeup
+
 evdev:atkbd:dmi:*:svnLENOVO:*:pvrLenovoYoga300-11IBR:*
  KEYBOARD_KEY_62=unknown  # Touchpad on, also emitted by "Ideapad extra buttons", ignore
  KEYBOARD_KEY_63=unknown  # Touchpad off, also emitted by "Ideapad extra buttons", ignore
@@ -925,6 +930,15 @@ evdev:input:b0003v04B3p301B*
 evdev:name:SIPODEV Lenovo HID Device:dmi:*:svnLENOVO:*:pvrLenovoideapadD330-10IGM:*
  KEYBOARD_KEY_70073=f21                                 # Fn+Supr (Touchpad toggle)
 
+###########################################################
+# LG
+###########################################################
+
+# LG Gram
+evdev:atkbd:dmi:bvn*:bvr*:bd*:svnLGElectronics:pn1*.AAS*:*
+ KEYBOARD_KEY_a0=!mute
+ KEYBOARD_KEY_ae=!volumedown
+ KEYBOARD_KEY_b0=!volumeup
 
 ###########################################################
 # Logitech
@@ -1631,6 +1645,14 @@ evdev:atkbd:dmi:bvn*:bvr*:bd*:svn[sS][aA][mM][sS][uU][nN][gG]*:pn*SX20S*:*
 
 evdev:atkbd:dmi:bvn*:bvr*:bd*:svn[sS][aA][mM][sS][uU][nN][gG]*:pn*700T*:*
  KEYBOARD_KEY_ad=leftmeta
+
+# Galaxy Book (2021) NP750XDA-KD4SE
+evdev:atkbd:dmi:bvn*:bvr*:bd*:svn[sS][aA][mM][sS][uU][nN][gG]*:pn750XDA:pvr*
+ KEYBOARD_KEY_81=!esc 		
+ KEYBOARD_KEY_ce=!prog1 	# Fn+F1 launch settings
+ KEYBOARD_KEY_ae=!volumedown 	# Fn+F7 volume down
+ KEYBOARD_KEY_b0=!volumeup	# Fn+F8 volume up
+
 
 ###########################################################
 # SONY
