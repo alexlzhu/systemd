@@ -884,15 +884,6 @@ int request_process_routing_policy_rule(Request *req) {
         if (r < 0)
                 return r;
 
-        /* To prevent a double decrement on failure in after_configure(). */
-        req->message_counter = NULL;
-
-        if (req->after_configure) {
-                r = req->after_configure(req, ret);
-                if (r < 0)
-                        return r;
-        }
-
         return 1;
 }
 
@@ -922,10 +913,7 @@ static bool routing_policy_rule_is_created_by_kernel(const RoutingPolicyRule *ru
 int manager_rtnl_process_rule(sd_netlink *rtnl, sd_netlink_message *message, Manager *m) {
         _cleanup_(routing_policy_rule_freep) RoutingPolicyRule *tmp = NULL;
         RoutingPolicyRule *rule = NULL;
-        const char *iif = NULL, *oif = NULL;
         bool adjust_protocol = false;
-        uint32_t suppress_prefixlen;
-        unsigned flags;
         uint16_t type;
         int r;
 
@@ -988,6 +976,7 @@ int manager_rtnl_process_rule(sd_netlink *rtnl, sd_netlink_message *message, Man
                 }
         }
 
+        unsigned flags;
         r = sd_rtnl_message_routing_policy_rule_get_flags(message, &flags);
         if (r < 0) {
                 log_warning_errno(r, "rtnl: received rule message without valid flag, ignoring: %m");
@@ -1034,23 +1023,17 @@ int manager_rtnl_process_rule(sd_netlink *rtnl, sd_netlink_message *message, Man
                 return 0;
         }
 
-        r = sd_netlink_message_read_string(message, FRA_IIFNAME, &iif);
+        r = sd_netlink_message_read_string_strdup(message, FRA_IIFNAME, &tmp->iif);
         if (r < 0 && r != -ENODATA) {
                 log_warning_errno(r, "rtnl: could not get FRA_IIFNAME attribute, ignoring: %m");
                 return 0;
         }
-        r = free_and_strdup(&tmp->iif, iif);
-        if (r < 0)
-                return log_oom();
 
-        r = sd_netlink_message_read_string(message, FRA_OIFNAME, &oif);
+        r = sd_netlink_message_read_string_strdup(message, FRA_OIFNAME, &tmp->oif);
         if (r < 0 && r != -ENODATA) {
                 log_warning_errno(r, "rtnl: could not get FRA_OIFNAME attribute, ignoring: %m");
                 return 0;
         }
-        r = free_and_strdup(&tmp->oif, oif);
-        if (r < 0)
-                return log_oom();
 
         r = sd_netlink_message_read_u8(message, FRA_IP_PROTO, &tmp->ipproto);
         if (r < 0 && r != -ENODATA) {
@@ -1093,6 +1076,7 @@ int manager_rtnl_process_rule(sd_netlink *rtnl, sd_netlink_message *message, Man
                 return 0;
         }
 
+        uint32_t suppress_prefixlen;
         r = sd_netlink_message_read_u32(message, FRA_SUPPRESS_PREFIXLEN, &suppress_prefixlen);
         if (r < 0 && r != -ENODATA) {
                 log_warning_errno(r, "rtnl: could not get FRA_SUPPRESS_PREFIXLEN attribute, ignoring: %m");

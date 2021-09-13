@@ -701,24 +701,21 @@ static int link_acquire_dynamic_conf(Link *link) {
         return 0;
 }
 
-int link_ipv6ll_gained(Link *link, const struct in6_addr *address) {
+int link_ipv6ll_gained(Link *link) {
         int r;
 
         assert(link);
 
         log_link_info(link, "Gained IPv6LL");
 
-        link->ipv6ll_address = *address;
+        if (!IN_SET(link->state, LINK_STATE_CONFIGURING, LINK_STATE_CONFIGURED))
+                return 0;
+
+        r = link_acquire_dynamic_ipv6_conf(link);
+        if (r < 0)
+                return r;
+
         link_check_ready(link);
-
-        if (IN_SET(link->state, LINK_STATE_CONFIGURING, LINK_STATE_CONFIGURED)) {
-                r = link_acquire_dynamic_ipv6_conf(link);
-                if (r < 0) {
-                        link_enter_failed(link);
-                        return r;
-                }
-        }
-
         return 0;
 }
 
@@ -1470,16 +1467,20 @@ static int link_initialized(Link *link, sd_device *device) {
         assert(link);
         assert(device);
 
-        if (link->state != LINK_STATE_PENDING)
-                return 0;
+        /* Always replace with the new sd_device object. As the sysname (and possibly other properties
+         * or sysattrs) may be outdated. */
+        sd_device_ref(device);
+        sd_device_unref(link->sd_device);
+        link->sd_device = device;
 
-        if (link->sd_device)
+        /* Do not ignore unamanaged state case here. If an interface is renamed after being once
+         * configured, and the corresponding .network file has Name= in [Match] section, then the
+         * interface may be already in unmanaged state. See #20657. */
+        if (!IN_SET(link->state, LINK_STATE_PENDING, LINK_STATE_UNMANAGED))
                 return 0;
 
         log_link_debug(link, "udev initialized link");
         link_set_state(link, LINK_STATE_INITIALIZED);
-
-        link->sd_device = sd_device_ref(device);
 
         /* udev has initialized the link, but we don't know if we have yet
          * processed the NEWLINK messages with the latest state. Do a GETLINK,
@@ -1617,7 +1618,10 @@ static int link_carrier_lost(Link *link) {
                 /* let's shortcut things for CAN which doesn't need most of what's done below. */
                 return 0;
 
-        if (link->network && link->network->ignore_carrier_loss)
+        if (!link->network)
+                return 0;
+
+        if (link->network->ignore_carrier_loss)
                 return 0;
 
         r = link_stop_engines(link, false);
@@ -2276,12 +2280,9 @@ static int link_update_name(Link *link, sd_netlink_message *message) {
                         return log_link_debug_errno(link, r, "Failed to update interface name in IPv4LL client: %m");
         }
 
-        Address *a;
-        SET_FOREACH(a, link->addresses_ipv4acd) {
-                r = sd_ipv4acd_set_ifname(a->acd, link->ifname);
-                if (r < 0)
-                        return log_link_debug_errno(link, r, "Failed to update interface name in IPv4ACD client: %m");
-        }
+        r = ipv4acd_set_ifname(link);
+        if (r < 0)
+                return log_link_debug_errno(link, r, "Failed to update interface name in IPv4ACD client: %m");
 
         return 0;
 }
