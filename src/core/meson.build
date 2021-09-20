@@ -71,8 +71,6 @@ libcore_sources = '''
         generator-setup.h
         ima-setup.c
         ima-setup.h
-        ip-address-access.c
-        ip-address-access.h
         job.c
         job.h
         kill.c
@@ -202,7 +200,7 @@ foreach item : in_files
                 output: file,
                 command : [meson_render_jinja2, config_h, '@INPUT@'],
                 capture : true,
-                install : (dir == pkgsysconfdir and install_sysconfdir_samples) or (dir != pkgsysconfdir and dir != 'no'),
+                install : (dir == pkgsysconfdir) ? install_sysconfdir_samples : (dir != 'no'),
                 install_dir : dir)
 endforeach
 

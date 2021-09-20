@@ -22,24 +22,6 @@
 
 #define ROUTES_DEFAULT_MAX_PER_FAMILY 4096U
 
-static uint32_t link_get_vrf_table(const Link *link) {
-        return link->network->vrf ? VRF(link->network->vrf)->table : RT_TABLE_MAIN;
-}
-
-uint32_t link_get_dhcp_route_table(const Link *link) {
-        /* When the interface is part of an VRF use the VRFs routing table, unless
-         * another table is explicitly specified. */
-        if (link->network->dhcp_route_table_set)
-                return link->network->dhcp_route_table;
-        return link_get_vrf_table(link);
-}
-
-uint32_t link_get_ipv6_accept_ra_route_table(const Link *link) {
-        if (link->network->ipv6_accept_ra_route_table_set)
-                return link->network->ipv6_accept_ra_route_table;
-        return link_get_vrf_table(link);
-}
-
 static const char * const route_type_table[__RTN_MAX] = {
         [RTN_UNICAST]     = "unicast",
         [RTN_LOCAL]       = "local",
@@ -1727,14 +1709,21 @@ static int route_is_ready_to_configure(const Route *route, Link *link) {
                 if (manager_get_nexthop_by_id(link->manager, route->nexthop_id, &nh) < 0)
                         return false;
 
-                HASHMAP_FOREACH(nhg, nh->group)
-                        if (manager_get_nexthop_by_id(link->manager, nhg->id, NULL) < 0)
+                if (!nexthop_exists(nh))
+                        return false;
+
+                HASHMAP_FOREACH(nhg, nh->group) {
+                        NextHop *g;
+
+                        if (manager_get_nexthop_by_id(link->manager, nhg->id, &g) < 0)
                                 return false;
+
+                        if (!nexthop_exists(g))
+                                return false;
+                }
         }
 
-        if (route_type_is_reject(route) || (nh && nh->blackhole)) {
-                if (nh && link->manager->nexthop_remove_messages > 0)
-                        return false;
+        if (route_type_is_reject(route)) {
                 if (link->manager->route_remove_messages > 0)
                         return false;
         } else {
@@ -1742,8 +1731,6 @@ static int route_is_ready_to_configure(const Route *route, Link *link) {
 
                 HASHMAP_FOREACH(l, link->manager->links_by_index) {
                         if (l->address_remove_messages > 0)
-                                return false;
-                        if (l->nexthop_remove_messages > 0)
                                 return false;
                         if (l->route_remove_messages > 0)
                                 return false;

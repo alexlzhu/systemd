@@ -9,7 +9,7 @@
 #include "dhcp6-internal.h"
 #include "escape.h"
 #include "hexdecoct.h"
-#include "in-addr-util.h"
+#include "in-addr-prefix-util.h"
 #include "networkd-dhcp-common.h"
 #include "networkd-link.h"
 #include "networkd-manager.h"
@@ -18,6 +18,44 @@
 #include "socket-util.h"
 #include "string-table.h"
 #include "strv.h"
+#include "vrf.h"
+
+static uint32_t link_get_vrf_table(Link *link) {
+        assert(link);
+        assert(link->network);
+
+        return link->network->vrf ? VRF(link->network->vrf)->table : RT_TABLE_MAIN;
+}
+
+uint32_t link_get_dhcp4_route_table(Link *link) {
+        assert(link);
+        assert(link->network);
+
+        /* When the interface is part of an VRF use the VRFs routing table, unless
+         * another table is explicitly specified. */
+
+        if (link->network->dhcp_route_table_set)
+                return link->network->dhcp_route_table;
+        return link_get_vrf_table(link);
+}
+
+uint32_t link_get_dhcp6_route_table(Link *link) {
+        assert(link);
+        assert(link->network);
+
+        if (link->network->dhcp6_route_table_set)
+                return link->network->dhcp6_route_table;
+        return link_get_vrf_table(link);
+}
+
+uint32_t link_get_ipv6_accept_ra_route_table(Link *link) {
+        assert(link);
+        assert(link->network);
+
+        if (link->network->ipv6_accept_ra_route_table_set)
+                return link->network->ipv6_accept_ra_route_table;
+        return link_get_vrf_table(link);
+}
 
 bool link_dhcp_enabled(Link *link, int family) {
         assert(link);
@@ -272,7 +310,7 @@ int config_parse_dhcp(
         return 0;
 }
 
-int config_parse_dhcp_route_metric(
+int config_parse_dhcp_or_ra_route_metric(
                 const char* unit,
                 const char *filename,
                 unsigned line,
@@ -290,6 +328,7 @@ int config_parse_dhcp_route_metric(
 
         assert(filename);
         assert(lvalue);
+        assert(IN_SET(ltype, AF_UNSPEC, AF_INET, AF_INET6));
         assert(rvalue);
         assert(data);
 
@@ -300,17 +339,24 @@ int config_parse_dhcp_route_metric(
                 return 0;
         }
 
-        if (streq_ptr(section, "DHCPv4")) {
+        switch(ltype) {
+        case AF_INET:
                 network->dhcp_route_metric = metric;
                 network->dhcp_route_metric_set = true;
-        } else if (STRPTR_IN_SET(section, "DHCPv6", "IPv6AcceptRA")) {
+                break;
+        case AF_INET6:
                 network->ipv6_accept_ra_route_metric = metric;
                 network->ipv6_accept_ra_route_metric_set = true;
-        } else { /* [DHCP] section */
+                break;
+        case AF_UNSPEC:
+                /* For backward compatibility. */
                 if (!network->dhcp_route_metric_set)
                         network->dhcp_route_metric = metric;
                 if (!network->ipv6_accept_ra_route_metric_set)
                         network->ipv6_accept_ra_route_metric = metric;
+                break;
+        default:
+                assert_not_reached();
         }
 
         return 0;
@@ -333,6 +379,7 @@ int config_parse_dhcp_use_dns(
 
         assert(filename);
         assert(lvalue);
+        assert(IN_SET(ltype, AF_UNSPEC, AF_INET, AF_INET6));
         assert(rvalue);
         assert(data);
 
@@ -343,17 +390,24 @@ int config_parse_dhcp_use_dns(
                 return 0;
         }
 
-        if (streq_ptr(section, "DHCPv4")) {
+        switch(ltype) {
+        case AF_INET:
                 network->dhcp_use_dns = r;
                 network->dhcp_use_dns_set = true;
-        } else if (streq_ptr(section, "DHCPv6")) {
+                break;
+        case AF_INET6:
                 network->dhcp6_use_dns = r;
                 network->dhcp6_use_dns_set = true;
-        } else { /* [DHCP] section */
+                break;
+        case AF_UNSPEC:
+                /* For backward compatibility. */
                 if (!network->dhcp_use_dns_set)
                         network->dhcp_use_dns = r;
                 if (!network->dhcp6_use_dns_set)
                         network->dhcp6_use_dns = r;
+                break;
+        default:
+                assert_not_reached();
         }
 
         return 0;
@@ -376,6 +430,7 @@ int config_parse_dhcp_use_domains(
 
         assert(filename);
         assert(lvalue);
+        assert(IN_SET(ltype, AF_UNSPEC, AF_INET, AF_INET6));
         assert(rvalue);
         assert(data);
 
@@ -386,17 +441,24 @@ int config_parse_dhcp_use_domains(
                 return 0;
         }
 
-        if (streq_ptr(section, "DHCPv4")) {
+        switch(ltype) {
+        case AF_INET:
                 network->dhcp_use_domains = d;
                 network->dhcp_use_domains_set = true;
-        } else if (streq_ptr(section, "DHCPv6")) {
+                break;
+        case AF_INET6:
                 network->dhcp6_use_domains = d;
                 network->dhcp6_use_domains_set = true;
-        } else { /* [DHCP] section */
+                break;
+        case AF_UNSPEC:
+                /* For backward compatibility. */
                 if (!network->dhcp_use_domains_set)
                         network->dhcp_use_domains = d;
                 if (!network->dhcp6_use_domains_set)
                         network->dhcp6_use_domains = d;
+                break;
+        default:
+                assert_not_reached();
         }
 
         return 0;
@@ -419,6 +481,7 @@ int config_parse_dhcp_use_ntp(
 
         assert(filename);
         assert(lvalue);
+        assert(IN_SET(ltype, AF_UNSPEC, AF_INET, AF_INET6));
         assert(rvalue);
         assert(data);
 
@@ -429,23 +492,30 @@ int config_parse_dhcp_use_ntp(
                 return 0;
         }
 
-        if (streq_ptr(section, "DHCPv4")) {
+        switch(ltype) {
+        case AF_INET:
                 network->dhcp_use_ntp = r;
                 network->dhcp_use_ntp_set = true;
-        } else if (streq_ptr(section, "DHCPv6")) {
+                break;
+        case AF_INET6:
                 network->dhcp6_use_ntp = r;
                 network->dhcp6_use_ntp_set = true;
-        } else { /* [DHCP] section */
+                break;
+        case AF_UNSPEC:
+                /* For backward compatibility. */
                 if (!network->dhcp_use_ntp_set)
                         network->dhcp_use_ntp = r;
                 if (!network->dhcp6_use_ntp_set)
                         network->dhcp6_use_ntp = r;
+                break;
+        default:
+                assert_not_reached();
         }
 
         return 0;
 }
 
-int config_parse_section_route_table(
+int config_parse_dhcp_or_ra_route_table(
                 const char *unit,
                 const char *filename,
                 unsigned line,
@@ -463,6 +533,11 @@ int config_parse_section_route_table(
 
         assert(filename);
         assert(lvalue);
+        assert(IN_SET(ltype,
+                      (RTPROT_DHCP<<16) | AF_UNSPEC,
+                      (RTPROT_DHCP<<16) | AF_INET,
+                      (RTPROT_DHCP<<16) | AF_INET6,
+                      (RTPROT_RA<<16) | AF_INET6));
         assert(rvalue);
         assert(data);
 
@@ -473,12 +548,34 @@ int config_parse_section_route_table(
                 return 0;
         }
 
-        if (STRPTR_IN_SET(section, "DHCP", "DHCPv4")) {
+        switch(ltype) {
+        case (RTPROT_DHCP<<16) | AF_INET:
                 network->dhcp_route_table = rt;
                 network->dhcp_route_table_set = true;
-        } else { /* section is IPv6AcceptRA */
+                network->dhcp_route_table_set_explicitly = true;
+                break;
+        case (RTPROT_DHCP<<16) | AF_INET6:
+                network->dhcp6_route_table = rt;
+                network->dhcp6_route_table_set = true;
+                network->dhcp6_route_table_set_explicitly = true;
+                break;
+        case (RTPROT_DHCP<<16) | AF_UNSPEC:
+                /* For backward compatibility. */
+                if (!network->dhcp_route_table_set_explicitly) {
+                        network->dhcp_route_table = rt;
+                        network->dhcp_route_table_set = true;
+                }
+                if (!network->dhcp6_route_table_set_explicitly) {
+                        network->dhcp6_route_table = rt;
+                        network->dhcp6_route_table_set = true;
+                }
+                break;
+        case (RTPROT_RA<<16) | AF_INET6:
                 network->ipv6_accept_ra_route_table = rt;
                 network->ipv6_accept_ra_route_table_set = true;
+                break;
+        default:
+                assert_not_reached();
         }
 
         return 0;
@@ -605,8 +702,10 @@ int config_parse_dhcp_send_option(
                 void *data,
                 void *userdata) {
 
-        _cleanup_(sd_dhcp_option_unrefp) sd_dhcp_option *opt4 = NULL, *old4 = NULL;
-        _cleanup_(sd_dhcp6_option_unrefp) sd_dhcp6_option *opt6 = NULL, *old6 = NULL;
+        _cleanup_(sd_dhcp_option_unrefp) sd_dhcp_option *opt4 = NULL;
+        _cleanup_(sd_dhcp6_option_unrefp) sd_dhcp6_option *opt6 = NULL;
+        _unused_ _cleanup_(sd_dhcp_option_unrefp) sd_dhcp_option *old4 = NULL;
+        _unused_ _cleanup_(sd_dhcp6_option_unrefp) sd_dhcp6_option *old6 = NULL;
         uint32_t uint32_data, enterprise_identifier = 0;
         _cleanup_free_ char *word = NULL, *q = NULL;
         OrderedHashmap **options = data;
@@ -1167,70 +1266,4 @@ int config_parse_network_duid_rawdata(
 
         /* For backward compatibility, also set DHCPv6 DUID if not specified explicitly. */
         return config_parse_duid_rawdata(unit, filename, line, section, section_line, lvalue, false, rvalue, &network->dhcp6_duid, network);
-}
-
-int config_parse_address_filter(
-                const char *unit,
-                const char *filename,
-                unsigned line,
-                const char *section,
-                unsigned section_line,
-                const char *lvalue,
-                int ltype,
-                const char *rvalue,
-                void *data,
-                void *userdata) {
-
-        Set **list = data;
-        int r;
-
-        assert(filename);
-        assert(lvalue);
-        assert(IN_SET(ltype, AF_INET, AF_INET6));
-        assert(rvalue);
-        assert(data);
-
-        if (isempty(rvalue)) {
-                *list = set_free(*list);
-                return 0;
-        }
-
-        for (const char *p = rvalue;;) {
-                _cleanup_free_ char *n = NULL;
-                _cleanup_free_ struct in_addr_prefix *a = NULL;
-                struct in_addr_prefix prefix;
-
-                r = extract_first_word(&p, &n, NULL, 0);
-                if (r == -ENOMEM)
-                        return log_oom();
-                if (r < 0) {
-                        log_syntax(unit, LOG_WARNING, filename, line, r,
-                                   "Failed to parse NDisc %s=, ignoring assignment: %s",
-                                   lvalue, rvalue);
-                        return 0;
-                }
-                if (r == 0)
-                        return 0;
-
-                r = in_addr_prefix_from_string(n, ltype, &prefix.address, &prefix.prefixlen);
-                if (r < 0) {
-                        log_syntax(unit, LOG_WARNING, filename, line, r,
-                                   "NDisc %s= entry is invalid, ignoring assignment: %s",
-                                   lvalue, n);
-                        continue;
-                }
-
-                prefix.family = ltype;
-                a = newdup(struct in_addr_prefix, &prefix, 1);
-                if (!a)
-                        return log_oom();
-
-                r = set_ensure_consume(list, &in_addr_prefix_hash_ops_free, TAKE_PTR(a));
-                if (r < 0)
-                        return log_oom();
-                if (r == 0)
-                        log_syntax(unit, LOG_WARNING, filename, line, 0,
-                                   "%s %s= entry is duplicated, ignoring assignment: %s",
-                                   section, lvalue, n);
-        }
 }
