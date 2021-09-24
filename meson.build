@@ -501,6 +501,8 @@ foreach ident : [
                                  #include <unistd.h>'''],
         ['pivot_root',        '''#include <stdlib.h>
                                  #include <unistd.h>'''],     # no known header declares pivot_root
+        ['ioprio_get',        '''#include <sched.h>'''],      # no known header declares ioprio_get
+        ['ioprio_set',        '''#include <sched.h>'''],      # no known header declares ioprio_set
         ['name_to_handle_at', '''#include <sys/types.h>
                                  #include <sys/stat.h>
                                  #include <fcntl.h>'''],
@@ -1024,8 +1026,11 @@ else
 endif
 conf.set10('HAVE_APPARMOR', have)
 
-conf.set10('HAVE_SMACK_RUN_LABEL', get_option('smack-run-label') != '')
-conf.set_quoted('SMACK_RUN_LABEL', get_option('smack-run-label'))
+have = get_option('smack') and get_option('smack-run-label') != ''
+conf.set10('HAVE_SMACK_RUN_LABEL', have)
+if have
+        conf.set_quoted('SMACK_RUN_LABEL', get_option('smack-run-label'))
+endif
 
 want_polkit = get_option('polkit')
 install_polkit = false
@@ -1631,8 +1636,6 @@ if get_option('efi')
 
         have = true
         conf.set_quoted('EFI_MACHINE_TYPE_NAME', EFI_MACHINE_TYPE_NAME)
-
-        conf.set('SD_TPM_PCR', get_option('tpm-pcrindex'))
 else
         have = false
 endif
@@ -2293,7 +2296,7 @@ if conf.get('ENABLE_PORTABLED') == 1
                 systemd_portabled_sources,
                 include_directories : includes,
                 link_with : [libshared],
-                dependencies : [threads],
+                dependencies : [threads, libselinux],
                 install_rpath : rootlibexecdir,
                 install : true,
                 install_dir : rootlibexecdir)
