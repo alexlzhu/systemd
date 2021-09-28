@@ -2317,6 +2317,8 @@ node /org/freedesktop/systemd1/unit/avahi_2ddaemon_2eservice {
       readonly s TimeoutStopFailureMode = '...';
       @org.freedesktop.DBus.Property.EmitsChangedSignal("const")
       readonly t RuntimeMaxUSec = ...;
+      @org.freedesktop.DBus.Property.EmitsChangedSignal("const")
+      readonly t RuntimeRandomizedExtraUSec = ...;
       @org.freedesktop.DBus.Property.EmitsChangedSignal("false")
       readonly t WatchdogUSec = ...;
       @org.freedesktop.DBus.Property.EmitsChangedSignal("false")
@@ -2737,6 +2739,8 @@ node /org/freedesktop/systemd1/unit/avahi_2ddaemon_2eservice {
       @org.freedesktop.DBus.Property.EmitsChangedSignal("const")
       readonly as NoExecPaths = ['...', ...];
       @org.freedesktop.DBus.Property.EmitsChangedSignal("const")
+      readonly as ExecSearchPath = ['...', ...];
+      @org.freedesktop.DBus.Property.EmitsChangedSignal("const")
       readonly t MountFlags = ...;
       @org.freedesktop.DBus.Property.EmitsChangedSignal("const")
       readonly b PrivateTmp = ...;
@@ -2887,6 +2891,8 @@ node /org/freedesktop/systemd1/unit/avahi_2ddaemon_2eservice {
     <!--property TimeoutStopFailureMode is not documented!-->
 
     <!--property RuntimeMaxUSec is not documented!-->
+
+    <!--property RuntimeRandomizedExtraUSec is not documented!-->
 
     <!--property WatchdogUSec is not documented!-->
 
@@ -3260,6 +3266,8 @@ node /org/freedesktop/systemd1/unit/avahi_2ddaemon_2eservice {
 
     <!--property NoExecPaths is not documented!-->
 
+    <!--property ExecSearchPath is not documented!-->
+
     <!--property PrivateTmp is not documented!-->
 
     <!--property PrivateDevices is not documented!-->
@@ -3421,6 +3429,8 @@ node /org/freedesktop/systemd1/unit/avahi_2ddaemon_2eservice {
     <variablelist class="dbus-property" generated="True" extra-ref="TimeoutStopFailureMode"/>
 
     <variablelist class="dbus-property" generated="True" extra-ref="RuntimeMaxUSec"/>
+
+    <variablelist class="dbus-property" generated="True" extra-ref="RuntimeRandomizedExtraUSec"/>
 
     <variablelist class="dbus-property" generated="True" extra-ref="WatchdogUSec"/>
 
@@ -3857,6 +3867,8 @@ node /org/freedesktop/systemd1/unit/avahi_2ddaemon_2eservice {
     <variablelist class="dbus-property" generated="True" extra-ref="ExecPaths"/>
 
     <variablelist class="dbus-property" generated="True" extra-ref="NoExecPaths"/>
+
+    <variablelist class="dbus-property" generated="True" extra-ref="ExecSearchPath"/>
 
     <variablelist class="dbus-property" generated="True" extra-ref="MountFlags"/>
 
@@ -4567,6 +4579,8 @@ node /org/freedesktop/systemd1/unit/avahi_2ddaemon_2esocket {
       @org.freedesktop.DBus.Property.EmitsChangedSignal("const")
       readonly as NoExecPaths = ['...', ...];
       @org.freedesktop.DBus.Property.EmitsChangedSignal("const")
+      readonly as ExecSearchPath = ['...', ...];
+      @org.freedesktop.DBus.Property.EmitsChangedSignal("const")
       readonly t MountFlags = ...;
       @org.freedesktop.DBus.Property.EmitsChangedSignal("const")
       readonly b PrivateTmp = ...;
@@ -5117,6 +5131,8 @@ node /org/freedesktop/systemd1/unit/avahi_2ddaemon_2esocket {
     <!--property ExecPaths is not documented!-->
 
     <!--property NoExecPaths is not documented!-->
+
+    <!--property ExecSearchPath is not documented!-->
 
     <!--property PrivateTmp is not documented!-->
 
@@ -5713,6 +5729,8 @@ node /org/freedesktop/systemd1/unit/avahi_2ddaemon_2esocket {
     <variablelist class="dbus-property" generated="True" extra-ref="ExecPaths"/>
 
     <variablelist class="dbus-property" generated="True" extra-ref="NoExecPaths"/>
+
+    <variablelist class="dbus-property" generated="True" extra-ref="ExecSearchPath"/>
 
     <variablelist class="dbus-property" generated="True" extra-ref="MountFlags"/>
 
@@ -6320,6 +6338,8 @@ node /org/freedesktop/systemd1/unit/home_2emount {
       @org.freedesktop.DBus.Property.EmitsChangedSignal("const")
       readonly as NoExecPaths = ['...', ...];
       @org.freedesktop.DBus.Property.EmitsChangedSignal("const")
+      readonly as ExecSearchPath = ['...', ...];
+      @org.freedesktop.DBus.Property.EmitsChangedSignal("const")
       readonly t MountFlags = ...;
       @org.freedesktop.DBus.Property.EmitsChangedSignal("const")
       readonly b PrivateTmp = ...;
@@ -6798,6 +6818,8 @@ node /org/freedesktop/systemd1/unit/home_2emount {
     <!--property ExecPaths is not documented!-->
 
     <!--property NoExecPaths is not documented!-->
+
+    <!--property ExecSearchPath is not documented!-->
 
     <!--property PrivateTmp is not documented!-->
 
@@ -7312,6 +7334,8 @@ node /org/freedesktop/systemd1/unit/home_2emount {
     <variablelist class="dbus-property" generated="True" extra-ref="ExecPaths"/>
 
     <variablelist class="dbus-property" generated="True" extra-ref="NoExecPaths"/>
+
+    <variablelist class="dbus-property" generated="True" extra-ref="ExecSearchPath"/>
 
     <variablelist class="dbus-property" generated="True" extra-ref="MountFlags"/>
 
@@ -8040,6 +8064,8 @@ node /org/freedesktop/systemd1/unit/dev_2dsda3_2eswap {
       @org.freedesktop.DBus.Property.EmitsChangedSignal("const")
       readonly as NoExecPaths = ['...', ...];
       @org.freedesktop.DBus.Property.EmitsChangedSignal("const")
+      readonly as ExecSearchPath = ['...', ...];
+      @org.freedesktop.DBus.Property.EmitsChangedSignal("const")
       readonly t MountFlags = ...;
       @org.freedesktop.DBus.Property.EmitsChangedSignal("const")
       readonly b PrivateTmp = ...;
@@ -8504,6 +8530,8 @@ node /org/freedesktop/systemd1/unit/dev_2dsda3_2eswap {
     <!--property ExecPaths is not documented!-->
 
     <!--property NoExecPaths is not documented!-->
+
+    <!--property ExecSearchPath is not documented!-->
 
     <!--property PrivateTmp is not documented!-->
 
@@ -9004,6 +9032,8 @@ node /org/freedesktop/systemd1/unit/dev_2dsda3_2eswap {
     <variablelist class="dbus-property" generated="True" extra-ref="ExecPaths"/>
 
     <variablelist class="dbus-property" generated="True" extra-ref="NoExecPaths"/>
+
+    <variablelist class="dbus-property" generated="True" extra-ref="ExecSearchPath"/>
 
     <variablelist class="dbus-property" generated="True" extra-ref="MountFlags"/>
 
@@ -9721,6 +9751,8 @@ node /org/freedesktop/systemd1/unit/session_2d1_2escope {
       readonly s Result = '...';
       @org.freedesktop.DBus.Property.EmitsChangedSignal("const")
       readonly t RuntimeMaxUSec = ...;
+      @org.freedesktop.DBus.Property.EmitsChangedSignal("const")
+      readonly t RuntimeRandomizedExtraUSec = ...;
       @org.freedesktop.DBus.Property.EmitsChangedSignal("false")
       readonly s Slice = '...';
       @org.freedesktop.DBus.Property.EmitsChangedSignal("false")
@@ -9890,6 +9922,8 @@ node /org/freedesktop/systemd1/unit/session_2d1_2escope {
     <!--method AttachProcesses is not documented!-->
 
     <!--property RuntimeMaxUSec is not documented!-->
+
+    <!--property RuntimeRandomizedExtraUSec is not documented!-->
 
     <!--property Slice is not documented!-->
 
@@ -10068,6 +10102,8 @@ node /org/freedesktop/systemd1/unit/session_2d1_2escope {
     <variablelist class="dbus-property" generated="True" extra-ref="Result"/>
 
     <variablelist class="dbus-property" generated="True" extra-ref="RuntimeMaxUSec"/>
+
+    <variablelist class="dbus-property" generated="True" extra-ref="RuntimeRandomizedExtraUSec"/>
 
     <variablelist class="dbus-property" generated="True" extra-ref="Slice"/>
 
