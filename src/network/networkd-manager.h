@@ -28,6 +28,7 @@ struct Manager {
         Hashmap *polkit_registry;
         int ethtool_fd;
 
+        bool test_mode;
         bool enumerating;
         bool dirty;
         bool restarting;
@@ -49,8 +50,6 @@ struct Manager {
         Hashmap *links_by_hw_addr;
         Hashmap *netdevs;
         OrderedHashmap *networks;
-        Hashmap *dhcp6_prefixes;
-        Set *dhcp6_pd_prefixes;
         OrderedSet *address_pools;
 
         usec_t network_dirs_ts_usec;
@@ -96,10 +95,10 @@ struct Manager {
         OrderedSet *request_queue;
 };
 
-int manager_new(Manager **ret);
+int manager_new(Manager **ret, bool test_mode);
 Manager* manager_free(Manager *m);
 
-int manager_connect_bus(Manager *m);
+int manager_setup(Manager *m);
 int manager_start(Manager *m);
 
 int manager_load_config(Manager *m);
