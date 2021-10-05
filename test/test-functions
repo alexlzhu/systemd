@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
-# shellcheck disable=SC2031
 # -*- mode: shell-script; indent-tabs-mode: nil; sh-basic-offset: 4; -*-
+# SPDX-License-Identifier: LGPL-2.1-or-later
+#
+# shellcheck disable=SC2030,SC2031
 # ex: ts=8 sw=4 sts=4 et filetype=sh tw=180
 # Note: the shellcheck line above disables warning for variables which were
 #       modified in a subshell. In our case this behavior is expected, but
@@ -992,9 +994,11 @@ install_iscsi() {
         # dumps a list of files (perl modules) required by `tgt-admin` at
         # the runtime plus any DSOs loaded via DynaLoader. This list is then
         # passed to `inst_simple` which installs the necessary files into the image
+        #
+        # shellcheck disable=SC2016
         while read -r file; do
             inst_simple "$file"
-        done < <(perl -- <(cat $(command -v tgt-admin) <(echo -e 'use DynaLoader; print map { "$_\n" } values %INC; print join("\n", @DynaLoader::dl_shared_objects)')) -p | awk '/^\// { print $1 }')
+        done < <(perl -- <(cat "$(command -v tgt-admin)" <(echo -e 'use DynaLoader; print map { "$_\n" } values %INC; print join("\n", @DynaLoader::dl_shared_objects)')) -p | awk '/^\// { print $1 }')
     fi
 }
 
@@ -1008,6 +1012,13 @@ install_compiled_systemd() {
         exit 1
     fi
     (set -x; DESTDIR="$initdir" "$ninja_bin" -C "$BUILD_DIR" install)
+
+    # If we are doing coverage runs, copy over the binary notes files, as lcov expects to
+    # find them in the same directory as the runtime data counts
+    if meson configure "${BUILD_DIR:?}" | grep 'b_coverage' | awk '{ print $2 }' | grep -q 'true'; then
+        mkdir -p "${initdir}/${BUILD_DIR:?}/"
+        rsync -am --include='*/' --include='*.gcno' --exclude='*' "${BUILD_DIR:?}/" "${initdir}/${BUILD_DIR:?}/"
+    fi
 }
 
 install_debian_systemd() {
@@ -1166,6 +1177,9 @@ create_empty_image() {
         if meson configure "${BUILD_DIR:?}" | grep 'link-.*-shared' | awk '{ print $2 }' | grep -q 'false'; then
             size=$((size+=200))
         fi
+        if meson configure "${BUILD_DIR:?}" | grep 'b_coverage' | awk '{ print $2 }' | grep -q 'true'; then
+            size=$((size+=250))
+        fi
     fi
     if ! get_bool "$STRIP_BINARIES"; then
         size=$((4 * size))
@@ -1268,6 +1282,30 @@ check_asan_reports() {
     return $ret
 }
 
+check_coverage_reports() {
+    local root="${1:?}"
+
+    if get_bool "$NO_BUILD"; then
+        return 0
+    fi
+    if meson configure "${BUILD_DIR:?}" | grep 'b_coverage' | awk '{ print $2 }' | grep -q 'false'; then
+        return 0
+    fi
+
+    if [ -n "${ARTIFACT_DIRECTORY}" ]; then
+        dest="${ARTIFACT_DIRECTORY}/${testname:?}.coverage-info"
+    else
+        dest="${TESTDIR:?}/coverage-info"
+    fi
+
+    # Create a coverage report that will later be uploaded. Remove info about
+    # system libraries/headers, as we don't really care about them.
+    lcov --directory "${root}/${BUILD_DIR:?}" --capture --output-file "${dest}"
+    lcov --remove "${dest}" -o "${dest}" '/usr/include/*' '/usr/lib/*'
+
+    return 0
+}
+
 save_journal() {
     # Default to always saving journal
     local save="yes"
@@ -1337,6 +1375,8 @@ check_result_common() {
     fi
 
     check_asan_reports "$workspace" || ret=4
+
+    check_coverage_reports "$workspace" || ret=5
 
     save_journal "$workspace/var/log/journal" $ret
 
@@ -1529,7 +1569,7 @@ install_haveged() {
         dinfo "Install haveged files"
         inst /usr/sbin/haveged
         for u in /usr/lib/systemd/system/haveged*; do
-            inst $u
+            inst "$u"
         done
     fi
 }
@@ -1718,6 +1758,7 @@ install_pam() {
     done
 }
 
+# shellcheck disable=SC2120
 install_keymaps() {
     dinfo "Install keymaps"
     # The first three paths may be deprecated.
@@ -2579,7 +2620,7 @@ _test_cleanup() {
         [[ -n "$initdir" ]] && _umount_dir "$initdir"
         [[ -n "$IMAGE_PUBLIC" ]] && rm -vf "$IMAGE_PUBLIC"
         # If multiple setups/cleans are ran in parallel, this can cause a race
-        if [[ -n "$IMAGESTATEDIR" &&  $TEST_PARALLELIZE -ne 1 ]]; then
+        if [[ -n "$IMAGESTATEDIR" && $TEST_PARALLELIZE -ne 1 ]]; then
             rm -vf "${IMAGESTATEDIR}/default.img"
         fi
         [[ -n "$TESTDIR" ]] && rm -vfr "$TESTDIR"

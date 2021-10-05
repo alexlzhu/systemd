@@ -1,4 +1,5 @@
 #!/bin/bash
+# SPDX-License-Identifier: LGPL-2.1-or-later
 
 set -ex
 
@@ -75,7 +76,7 @@ if [[ "$COMPILER" == clang ]]; then
     # Following snippet was borrowed from https://apt.llvm.org/llvm.sh
     wget -O - https://apt.llvm.org/llvm-snapshot.gpg.key | apt-key add -
     add-apt-repository -y "deb http://apt.llvm.org/$RELEASE/   llvm-toolchain-$RELEASE-$COMPILER_VERSION  main"
-    PACKAGES+=(clang-$COMPILER_VERSION lldb-$COMPILER_VERSION lld-$COMPILER_VERSION clangd-$COMPILER_VERSION)
+    PACKAGES+=("clang-$COMPILER_VERSION" "lldb-$COMPILER_VERSION" "lld-$COMPILER_VERSION" "clangd-$COMPILER_VERSION")
 elif [[ "$COMPILER" == gcc ]]; then
     CC="gcc-$COMPILER_VERSION"
     CXX="g++-$COMPILER_VERSION"
@@ -83,7 +84,7 @@ elif [[ "$COMPILER" == gcc ]]; then
     # Latest gcc stack deb packages provided by
     # https://launchpad.net/~ubuntu-toolchain-r/+archive/ubuntu/test
     add-apt-repository -y ppa:ubuntu-toolchain-r/test
-    PACKAGES+=(gcc-$COMPILER_VERSION)
+    PACKAGES+=("gcc-$COMPILER_VERSION")
 else
     fatal "Unknown compiler: $COMPILER"
 fi
@@ -108,6 +109,7 @@ for args in "${ARGS[@]}"; do
     SECONDS=0
 
     info "Checking build with $args"
+    # shellcheck disable=SC2086
     if ! AR="$AR" CC="$CC" CXX="$CXX" CFLAGS="-Werror" CXXFLAGS="-Werror" meson -Dtests=unsafe -Dslow-tests=true -Dfuzz-tests=true --werror $args build; then
         fatal "meson failed with $args"
     fi
