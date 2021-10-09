@@ -148,6 +148,8 @@ tests += [
 
         [['src/test/test-utf8.c']],
 
+        [['src/test/test-kbd-util.c']],
+
         [['src/test/test-blockdev-util.c']],
 
         [['src/test/test-dev-setup.c']],
@@ -162,6 +164,8 @@ tests += [
         [['src/test/test-locale-util.c']],
 
         [['src/test/test-copy.c']],
+
+        [['src/test/test-recurse-dir.c']],
 
         [['src/test/test-data-fd-util.c']],
 
@@ -355,6 +359,17 @@ tests += [
          [libcore,
           libshared],
          [],
+         core_includes],
+
+        [['src/test/test-bpf-lsm.c'],
+         [libcore,
+          libshared],
+         [libmount,
+          threads,
+          librt,
+          libseccomp,
+          libselinux,
+          libblkid],
          core_includes],
 
         [['src/test/test-watch-pid.c'],

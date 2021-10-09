@@ -25,6 +25,8 @@ basic_sources = files('''
         capability-util.h
         cgroup-util.c
         cgroup-util.h
+        chase-symlinks.c
+        chase-symlinks.h
         chattr-util.c
         chattr-util.h
         conf-files.c
@@ -52,12 +54,16 @@ basic_sources = files('''
         fd-util.h
         fileio.c
         fileio.h
+        filesystems.c
+        filesystems.h
         format-util.c
         format-util.h
         fs-util.c
         fs-util.h
         glob-util.c
         glob-util.h
+        glyph-util.c
+        glyph-util.h
         gunicode.c
         gunicode.h
         hash-funcs.c
@@ -70,6 +76,8 @@ basic_sources = files('''
         hostname-util.h
         in-addr-util.c
         in-addr-util.h
+        inotify-util.c
+        inotify-util.h
         io-util.c
         io-util.h
         khash.c
@@ -184,6 +192,8 @@ basic_sources = files('''
         raw-reboot.h
         recovery-key.c
         recovery-key.h
+        recurse-dir.c
+        recurse-dir.h
         replace-var.c
         replace-var.h
         rlimit-util.c
@@ -215,6 +225,8 @@ basic_sources = files('''
         strv.h
         strxcpyx.c
         strxcpyx.h
+        sync-util.c
+        sync-util.h
         sysctl-util.c
         sysctl-util.h
         syslog-util.c
@@ -364,6 +376,34 @@ run_target(
                    syscall_lists])
 
 ############################################################
+
+filesystem_includes = ['linux/magic.h',
+                       'linux/gfs2_ondisk.h']
+
+check_filesystems = find_program('check-filesystems.sh')
+r = run_command([check_filesystems, cpp, 'filesystems-gperf.gperf'] + filesystem_includes)
+if r.returncode() != 0
+    error('found unknown filesystem(s) defined in kernel headers:\n\n' + r.stdout())
+    r.stdout()
+endif
+
+filesystems_gperf_h = custom_target(
+        'filesystems-gperf.h',
+        input : 'filesystems-gperf.gperf',
+        output : 'filesystems-gperf.h',
+        command : [gperf, '@INPUT@', '--output-file', '@OUTPUT@'])
+
+generate_filesystem_list = find_program('generate-filesystem-list.py')
+fname = 'filesystem-list.h'
+filesystem_list_h = custom_target(
+        fname,
+        input : 'filesystems-gperf.gperf',
+        output : fname,
+        command : [generate_filesystem_list,
+                   '@INPUT@'],
+        capture : true)
+
+basic_sources += [filesystem_list_h, filesystems_gperf_h]
 
 libbasic = static_library(
         'basic',

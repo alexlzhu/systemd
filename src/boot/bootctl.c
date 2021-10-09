@@ -2,7 +2,6 @@
 
 #include <ctype.h>
 #include <errno.h>
-#include <ftw.h>
 #include <getopt.h>
 #include <limits.h>
 #include <linux/magic.h>
@@ -25,7 +24,7 @@
 #include "fd-util.h"
 #include "fileio.h"
 #include "fs-util.h"
-#include "locale-util.h"
+#include "glyph-util.h"
 #include "main-func.h"
 #include "mkdir.h"
 #include "pager.h"
@@ -38,6 +37,7 @@
 #include "stdio-util.h"
 #include "string-util.h"
 #include "strv.h"
+#include "sync-util.h"
 #include "terminal-util.h"
 #include "tmpfile-util.h"
 #include "umask-util.h"
@@ -569,12 +569,11 @@ static int copy_file_with_version_check(const char *from, const char *to, bool f
 
         (void) copy_times(fd_from, fd_to, 0);
 
-        if (fsync(fd_to) < 0) {
+        r = fsync_full(fd_to);
+        if (r < 0) {
                 (void) unlink_noerrno(t);
-                return log_error_errno(errno, "Failed to copy data from \"%s\" to \"%s\": %m", from, t);
+                return log_error_errno(r, "Failed to copy data from \"%s\" to \"%s\": %m", from, t);
         }
-
-        (void) fsync_directory_of_file(fd_to);
 
         if (renameat(AT_FDCWD, t, AT_FDCWD, to) < 0) {
                 (void) unlink_noerrno(t);

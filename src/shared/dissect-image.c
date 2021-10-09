@@ -24,6 +24,7 @@
 #include "ask-password-api.h"
 #include "blkid-util.h"
 #include "blockdev-util.h"
+#include "chase-symlinks.h"
 #include "conf-files.h"
 #include "copy.h"
 #include "cryptsetup-util.h"
@@ -1595,7 +1596,7 @@ int dissect_image(
                         }
 
                         if (m->verity_ready)
-                                m->verity_sig_ready = !!verity->root_hash_sig;
+                                m->verity_sig_ready = verity->root_hash_sig;
 
                 } else if (m->partitions[verity->designator == PARTITION_USR ? PARTITION_USR_VERITY_SIG : PARTITION_ROOT_VERITY_SIG].found) {
 
@@ -2764,7 +2765,7 @@ int verity_settings_load(
                          * that doesn't exist for /usr */
 
                         if (designator < 0 || designator == PARTITION_ROOT) {
-                                r = getxattr_malloc(image, "user.verity.roothash", &text, true);
+                                r = getxattr_malloc(image, "user.verity.roothash", &text);
                                 if (r < 0) {
                                         _cleanup_free_ char *p = NULL;
 
@@ -2793,7 +2794,7 @@ int verity_settings_load(
                                  * `usrhash`, because `usrroothash` or `rootusrhash` would just be too
                                  * confusing. We thus drop the reference to the root of the Merkle tree, and
                                  * just indicate which file system it's about. */
-                                r = getxattr_malloc(image, "user.verity.usrhash", &text, true);
+                                r = getxattr_malloc(image, "user.verity.usrhash", &text);
                                 if (r < 0) {
                                         _cleanup_free_ char *p = NULL;
 
@@ -3267,6 +3268,15 @@ int dissect_image_and_warn(
 
         case -EPROTONOSUPPORT:
                 return log_error_errno(r, "Device '%s' is loopback block device with partition scanning turned off, please turn it on.", name);
+
+        case -EBADR:
+                return log_error_errno(r,
+                                       "Combining partitioned images (such as '%s') with external Verity data (such as '%s') not supported. "
+                                       "(Consider setting $SYSTEMD_DISSECT_VERITY_SIDECAR=0 to disable automatic discovery of external Verity data.)",
+                                       name, strna(verity ? verity->data_path : NULL));
+
+        case -ENOTBLK:
+                return log_error_errno(r, "Specified image '%s' is not a block device.", name);
 
         default:
                 if (r < 0)
