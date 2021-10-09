@@ -666,7 +666,15 @@ static int setup_output(
                 return open_terminal_as(exec_context_tty_path(context), O_WRONLY, fileno);
 
         case EXEC_OUTPUT_KMSG:
-        case EXEC_OUTPUT_KMSG_AND_CONSOLE:
+        case EXEC_OUTPUT_KMSG_AND_CONSOLE: {
+                int fd, flags = O_WRONLY;
+                fd = acquire_path("/dev/kmsg", flags, 0666 & ~context->umask);
+                if (fd < 0)
+                        return fd;
+
+                return move_fd(fd, fileno, 0);
+        }
+
         case EXEC_OUTPUT_JOURNAL:
         case EXEC_OUTPUT_JOURNAL_AND_CONSOLE:
                 r = connect_logger_as(unit, context, params, o, ident, fileno, uid, gid);
