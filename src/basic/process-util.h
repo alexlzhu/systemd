@@ -166,13 +166,13 @@ typedef enum ForkFlags {
         FORK_NEW_USERNS         = 1 << 13, /* Run child in its own user namespace */
 } ForkFlags;
 
-int safe_fork_full(const char *name, int except_fds[], size_t n_except_fds, ForkFlags flags, pid_t *ret_pid);
+int safe_fork_full(const char *name, const int except_fds[], size_t n_except_fds, ForkFlags flags, pid_t *ret_pid);
 
 static inline int safe_fork(const char *name, ForkFlags flags, pid_t *ret_pid) {
         return safe_fork_full(name, NULL, 0, flags, ret_pid);
 }
 
-int namespace_fork(const char *outer_name, const char *inner_name, int except_fds[], size_t n_except_fds, ForkFlags flags, int pidns_fd, int mntns_fd, int netns_fd, int userns_fd, int root_fd, pid_t *ret_pid);
+int namespace_fork(const char *outer_name, const char *inner_name, const int except_fds[], size_t n_except_fds, ForkFlags flags, int pidns_fd, int mntns_fd, int netns_fd, int userns_fd, int root_fd, pid_t *ret_pid);
 
 int set_oom_score_adjust(int value);
 int get_oom_score_adjust(int *ret);
@@ -192,8 +192,9 @@ assert_cc(TASKS_MAX <= (unsigned long) PID_T_MAX);
 /* Like TAKE_PTR() but for child PIDs, resetting them to 0 */
 #define TAKE_PID(pid)                           \
         ({                                      \
-                pid_t _pid_ = (pid);            \
-                (pid) = 0;                      \
+                pid_t *_ppid_ = &(pid);         \
+                pid_t _pid_ = *_ppid_;          \
+                *_ppid_ = 0;                    \
                 _pid_;                          \
         })
 
@@ -202,3 +203,5 @@ int pidfd_get_pid(int fd, pid_t *ret);
 int setpriority_closest(int priority);
 
 bool invoked_as(char *argv[], const char *token);
+
+_noreturn_ void freeze(void);

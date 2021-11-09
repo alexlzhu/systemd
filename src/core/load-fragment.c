@@ -136,6 +136,7 @@ DEFINE_CONFIG_PARSE_ENUM(config_parse_protect_home, protect_home, ProtectHome, "
 DEFINE_CONFIG_PARSE_ENUM(config_parse_protect_system, protect_system, ProtectSystem, "Failed to parse protect system value");
 DEFINE_CONFIG_PARSE_ENUM(config_parse_runtime_preserve_mode, exec_preserve_mode, ExecPreserveMode, "Failed to parse runtime directory preserve mode");
 DEFINE_CONFIG_PARSE_ENUM(config_parse_service_type, service_type, ServiceType, "Failed to parse service type");
+DEFINE_CONFIG_PARSE_ENUM(config_parse_service_exit_type, service_exit_type, ServiceExitType, "Failed to parse service exit type");
 DEFINE_CONFIG_PARSE_ENUM(config_parse_service_restart, service_restart, ServiceRestart, "Failed to parse service restart specifier");
 DEFINE_CONFIG_PARSE_ENUM(config_parse_service_timeout_failure_mode, service_timeout_failure_mode, ServiceTimeoutFailureMode, "Failed to parse timeout failure mode");
 DEFINE_CONFIG_PARSE_ENUM(config_parse_socket_bind, socket_address_bind_ipv6_only_or_bool, SocketAddressBindIPv6Only, "Failed to parse bind IPv6 only value");
@@ -149,6 +150,84 @@ DEFINE_CONFIG_PARSE_PTR(config_parse_exec_mount_flags, mount_propagation_flags_f
 DEFINE_CONFIG_PARSE_ENUM_WITH_DEFAULT(config_parse_numa_policy, mpol, int, -1, "Invalid NUMA policy type");
 DEFINE_CONFIG_PARSE_ENUM(config_parse_status_unit_format, status_unit_format, StatusUnitFormat, "Failed to parse status unit format");
 DEFINE_CONFIG_PARSE_ENUM_FULL(config_parse_socket_timestamping, socket_timestamping_from_string_harder, SocketTimestamping, "Failed to parse timestamping precision");
+
+bool contains_instance_specifier_superset(const char *s) {
+        const char *p, *q;
+        bool percent = false;
+
+        assert(s);
+
+        p = strchr(s, '@');
+        if (!p)
+                return false;
+
+        p++; /* Skip '@' */
+
+        q = strrchr(p, '.');
+        if (!q)
+                q = p + strlen(p);
+
+        /* If the string is just the instance specifier, it's not a superset of the instance. */
+        if (memcmp_nn(p, q - p, "%i", strlen("%i")) == 0)
+                return false;
+
+        /* %i, %n and %N all expand to the instance or a superset of it. */
+        for (; p < q; p++) {
+                if (*p == '%')
+                        percent = !percent;
+                else if (percent) {
+                        if (IN_SET(*p, 'n', 'N', 'i'))
+                                return true;
+                        percent = false;
+                }
+        }
+
+        return false;
+}
+
+/* `name` is the rendered version of `format` via `unit_printf` or similar functions. */
+int unit_is_likely_recursive_template_dependency(Unit *u, const char *name, const char *format) {
+        const char *fragment_path;
+        int r;
+
+        assert(u);
+        assert(name);
+
+        /* If a template unit has a direct dependency on itself that includes the unit instance as part of
+         * the template instance via a unit specifier (%i, %n or %N), this will almost certainly lead to
+         * infinite recursion as systemd will keep instantiating new instances of the template unit.
+         * https://github.com/systemd/systemd/issues/17602 shows a good example of how this can happen in
+         * practice. To guard against this, we check for templates that depend on themselves and have the
+         * instantiated unit instance included as part of the template instance of the dependency via a
+         * specifier.
+         *
+         * For example, if systemd-notify@.service depends on systemd-notify@%n.service, this will result in
+         * infinite recursion.
+         */
+
+        if (!unit_name_is_valid(name, UNIT_NAME_INSTANCE))
+                return false;
+
+        if (!unit_name_prefix_equal(u->id, name))
+                return false;
+
+        if (u->type != unit_name_to_type(name))
+                return false;
+
+        r = unit_file_find_fragment(u->manager->unit_id_map, u->manager->unit_name_map, name, &fragment_path, NULL);
+        if (r < 0)
+                return r;
+
+        /* Fragment paths should also be equal as a custom fragment for a specific template instance
+         * wouldn't necessarily lead to infinite recursion. */
+        if (!path_equal_ptr(u->fragment_path, fragment_path))
+                return false;
+
+        if (!contains_instance_specifier_superset(format))
+                return false;
+
+        return true;
+}
 
 int config_parse_unit_deps(
                 const char *unit,
@@ -186,6 +265,18 @@ int config_parse_unit_deps(
                 r = unit_name_printf(u, word, &k);
                 if (r < 0) {
                         log_syntax(unit, LOG_WARNING, filename, line, r, "Failed to resolve unit specifiers in '%s', ignoring: %m", word);
+                        continue;
+                }
+
+                r = unit_is_likely_recursive_template_dependency(u, k, word);
+                if (r < 0) {
+                        log_syntax(unit, LOG_WARNING, filename, line, r, "Failed to determine if '%s' is a recursive dependency, ignoring: %m", k);
+                        continue;
+                }
+                if (r > 0) {
+                        log_syntax(unit, LOG_DEBUG, filename, line, 0,
+                                   "Dropping dependency %s=%s that likely leads to infinite recursion.",
+                                   unit_dependency_to_string(d), word);
                         continue;
                 }
 
@@ -4511,7 +4602,7 @@ int config_parse_exec_directories(
                 void *data,
                 void *userdata) {
 
-        char***rt = data;
+        ExecDirectory *ed = data;
         const Unit *u = userdata;
         int r;
 
@@ -4522,45 +4613,84 @@ int config_parse_exec_directories(
 
         if (isempty(rvalue)) {
                 /* Empty assignment resets the list */
-                *rt = strv_free(*rt);
+                exec_directory_done(ed);
                 return 0;
         }
 
         for (const char *p = rvalue;;) {
-                _cleanup_free_ char *word = NULL, *k = NULL;
+                _cleanup_free_ char *tuple = NULL;
 
-                r = extract_first_word(&p, &word, NULL, EXTRACT_UNQUOTE);
+                r = extract_first_word(&p, &tuple, NULL, EXTRACT_UNQUOTE|EXTRACT_RETAIN_ESCAPE);
                 if (r == -ENOMEM)
                         return log_oom();
                 if (r < 0) {
                         log_syntax(unit, LOG_WARNING, filename, line, r,
-                                   "Invalid syntax, ignoring: %s", rvalue);
+                                   "Invalid syntax %s=%s, ignoring: %m", lvalue, rvalue);
                         return 0;
                 }
                 if (r == 0)
                         return 0;
 
-                r = unit_path_printf(u, word, &k);
+                _cleanup_free_ char *src = NULL, *dest = NULL;
+                const char *q = tuple;
+                r = extract_many_words(&q, ":", EXTRACT_CUNESCAPE|EXTRACT_UNESCAPE_SEPARATORS, &src, &dest, NULL);
+                if (r == -ENOMEM)
+                        return log_oom();
+                if (r <= 0) {
+                        log_syntax(unit, LOG_WARNING, filename, line, r ?: SYNTHETIC_ERRNO(EINVAL),
+                                   "Invalid syntax in %s=, ignoring: %s", lvalue, tuple);
+                        return 0;
+                }
+
+                _cleanup_free_ char *sresolved = NULL;
+                r = unit_path_printf(u, src, &sresolved);
                 if (r < 0) {
                         log_syntax(unit, LOG_WARNING, filename, line, r,
-                                   "Failed to resolve unit specifiers in \"%s\", ignoring: %m", word);
+                                   "Failed to resolve unit specifiers in \"%s\", ignoring: %m", src);
                         continue;
                 }
 
-                r = path_simplify_and_warn(k, PATH_CHECK_RELATIVE, unit, filename, line, lvalue);
+                r = path_simplify_and_warn(sresolved, PATH_CHECK_RELATIVE, unit, filename, line, lvalue);
                 if (r < 0)
                         continue;
 
-                if (path_startswith(k, "private")) {
+                if (path_startswith(sresolved, "private")) {
                         log_syntax(unit, LOG_WARNING, filename, line, 0,
-                                   "%s= path can't be 'private', ignoring assignment: %s", lvalue, word);
+                                   "%s= path can't be 'private', ignoring assignment: %s", lvalue, tuple);
                         continue;
                 }
 
-                r = strv_push(rt, k);
+                /* For State and Runtime directories we support an optional destination parameter, which
+                 * will be used to create a symlink to the source. */
+                _cleanup_strv_free_ char **symlinks = NULL;
+                if (!isempty(dest)) {
+                        _cleanup_free_ char *dresolved = NULL;
+
+                        if (streq(lvalue, "ConfigurationDirectory")) {
+                                log_syntax(unit, LOG_WARNING, filename, line, 0,
+                                           "Destination parameter is not supported for ConfigurationDirectory, ignoring: %s", tuple);
+                                continue;
+                        }
+
+                        r = unit_path_printf(u, dest, &dresolved);
+                        if (r < 0) {
+                                log_syntax(unit, LOG_WARNING, filename, line, r,
+                                        "Failed to resolve unit specifiers in \"%s\", ignoring: %m", dest);
+                                continue;
+                        }
+
+                        r = path_simplify_and_warn(dresolved, PATH_CHECK_RELATIVE, unit, filename, line, lvalue);
+                        if (r < 0)
+                                continue;
+
+                        r = strv_consume(&symlinks, TAKE_PTR(dresolved));
+                        if (r < 0)
+                                return log_oom();
+                }
+
+                r = exec_directory_add(&ed->items, &ed->n_items, sresolved, symlinks);
                 if (r < 0)
                         return log_oom();
-                k = NULL;
         }
 }
 
@@ -6065,6 +6195,7 @@ void unit_dump_config_items(FILE *f) {
                 { config_parse_unit_deps,             "UNIT [...]" },
                 { config_parse_exec,                  "PATH [ARGUMENT [...]]" },
                 { config_parse_service_type,          "SERVICETYPE" },
+                { config_parse_service_exit_type,     "SERVICEEXITTYPE" },
                 { config_parse_service_restart,       "SERVICERESTART" },
                 { config_parse_service_timeout_failure_mode, "TIMEOUTMODE" },
                 { config_parse_kill_mode,             "KILLMODE" },
@@ -6333,4 +6464,61 @@ int config_parse_swap_priority(
         s->parameters_fragment.priority = priority;
         s->parameters_fragment.priority_set = true;
         return 0;
+}
+
+int config_parse_watchdog_sec(
+                const char *unit,
+                const char *filename,
+                unsigned line,
+                const char *section,
+                unsigned section_line,
+                const char *lvalue,
+                int ltype,
+                const char *rvalue,
+                void *data,
+                void *userdata) {
+
+        usec_t *usec = data;
+
+        assert(filename);
+        assert(lvalue);
+        assert(rvalue);
+
+        /* This is called for {Runtime,Reboot,KExec}WatchdogSec= where "default" maps to
+         * USEC_INFINITY internally. */
+
+        if (streq(rvalue, "default"))
+                *usec = USEC_INFINITY;
+        else if (streq(rvalue, "off"))
+                *usec = 0;
+        else
+                return config_parse_sec(unit, filename, line, section, section_line, lvalue, ltype, rvalue, data, userdata);
+
+        return 0;
+}
+
+int config_parse_tty_size(
+                const char *unit,
+                const char *filename,
+                unsigned line,
+                const char *section,
+                unsigned section_line,
+                const char *lvalue,
+                int ltype,
+                const char *rvalue,
+                void *data,
+                void *userdata) {
+
+        unsigned *sz = data;
+
+        assert(filename);
+        assert(lvalue);
+        assert(rvalue);
+
+        if (isempty(rvalue)) {
+                *sz = UINT_MAX;
+                return 0;
+        }
+
+        return config_parse_unsigned(unit, filename, line, section, section_line, lvalue, ltype, rvalue, data, userdata);
 }

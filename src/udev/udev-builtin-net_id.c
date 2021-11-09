@@ -35,8 +35,8 @@
 #include "string-util.h"
 #include "strv.h"
 #include "strxcpyx.h"
-#include "udev-builtin-net_id-netlink.h"
 #include "udev-builtin.h"
+#include "udev-netlink.h"
 
 #define ONBOARD_14BIT_INDEX_MAX ((1U << 14) - 1)
 #define ONBOARD_16BIT_INDEX_MAX ((1U << 16) - 1)
@@ -49,6 +49,7 @@ typedef enum NetNameType {
         NET_VIRTIO,
         NET_CCW,
         NET_VIO,
+        NET_XENVIF,
         NET_PLATFORM,
         NET_NETDEVSIM,
 } NetNameType;
@@ -66,6 +67,7 @@ typedef struct NetNames {
         char bcma_core[ALTIFNAMSIZ];
         char ccw_busid[ALTIFNAMSIZ];
         char vio_slot[ALTIFNAMSIZ];
+        char xen_slot[ALTIFNAMSIZ];
         char platform_path[ALTIFNAMSIZ];
         char netdevsim_path[ALTIFNAMSIZ];
 } NetNames;
@@ -342,22 +344,16 @@ static int dev_pci_slot(sd_device *dev, const LinkInfo *info, NetNames *names) {
                 r = safe_atolu_full(attr, 10, &dev_port);
                 if (r < 0)
                         log_device_debug_errno(dev, r, "Failed to parse attribute dev_port, ignoring: %m");
+
                 /* With older kernels IP-over-InfiniBand network interfaces sometimes erroneously
                  * provide the port number in the 'dev_id' sysfs attribute instead of 'dev_port',
                  * which thus stays initialized as 0. */
                 if (dev_port == 0 &&
-                    sd_device_get_sysattr_value(dev, "type", &attr) >= 0) {
-                        unsigned long type;
-
-                        r = safe_atolu_full(attr, 10, &type);
+                    info->iftype == ARPHRD_INFINIBAND &&
+                    sd_device_get_sysattr_value(dev, "dev_id", &attr) >= 0) {
+                        r = safe_atolu_full(attr, 10, &dev_port);
                         if (r < 0)
-                                log_device_debug_errno(dev, r, "Failed to parse attribute type, ignoring: %m");
-                        else if (type == ARPHRD_INFINIBAND &&
-                                 sd_device_get_sysattr_value(dev, "dev_id", &attr) >= 0) {
-                                r = safe_atolu_full(attr, 10, &dev_port);
-                                if (r < 0)
-                                        log_device_debug_errno(dev, r, "Failed to parse attribute dev_id, ignoring: %m");
-                        }
+                                log_device_debug_errno(dev, r, "Failed to parse attribute dev_id, ignoring: %m");
                 }
         }
 
@@ -819,6 +815,59 @@ static int names_netdevsim(sd_device *dev, const LinkInfo *info, NetNames *names
         return 0;
 }
 
+static int names_xen(sd_device *dev, NetNames *names) {
+        sd_device *parent;
+        unsigned id;
+        const char *syspath, *subsystem, *p, *p2;
+        int r;
+
+        assert(dev);
+        assert(names);
+
+        if (!naming_scheme_has(NAMING_XEN_VIF))
+                return 0;
+
+        /* check if our direct parent is a Xen VIF device with no other bus in-between */
+        r = sd_device_get_parent(dev, &parent);
+        if (r < 0)
+                return r;
+
+        /* Do an exact-match on subsystem "xen". This will miss on "xen-backend" on
+         * purpose as the VIFs on the backend (dom0) have their own naming scheme
+         * which we don't want to affect
+         */
+        r = sd_device_get_subsystem(parent, &subsystem);
+        if (r < 0)
+                return r;
+        if (!streq("xen", subsystem))
+                return -ENOENT;
+
+        /* Use the vif-n name to extract "n" */
+        r = sd_device_get_syspath(dev, &syspath);
+        if (r < 0)
+                return r;
+
+        p = path_startswith(syspath, "/sys/devices/");
+        if (!p)
+                return -ENOENT;
+        p = startswith(p, "vif-");
+        if (!p)
+                return -ENOENT;
+        p2 = strchr(p, '/');
+        if (!p2)
+                return -ENOENT;
+        p = strndupa_safe(p, p2 - p);
+        if (!p)
+                return -ENOENT;
+        r = safe_atou_full(p, SAFE_ATO_REFUSE_PLUS_MINUS | SAFE_ATO_REFUSE_LEADING_ZERO |
+                           SAFE_ATO_REFUSE_LEADING_WHITESPACE | 10, &id);
+        if (r < 0)
+                return r;
+        xsprintf(names->xen_slot, "X%u", id);
+        names->type = NET_XENVIF;
+        return 0;
+}
+
 /* IEEE Organizationally Unique Identifier vendor string */
 static int ieee_oui(sd_device *dev, const LinkInfo *info, bool test) {
         char str[32];
@@ -859,7 +908,7 @@ static int builtin_net_id(sd_device *dev, sd_netlink **rtnl, int argc, char *arg
         if (r < 0)
                 return r;
 
-        if (!info.support_phys_port_name) {
+        if (!info.phys_port_name_supported) {
                 const char *s;
 
                 r = sd_device_get_sysattr_value(dev, "phys_port_name", &s);
@@ -869,6 +918,10 @@ static int builtin_net_id(sd_device *dev, sd_netlink **rtnl, int argc, char *arg
                                 return log_oom();
                 }
         }
+
+        r = device_cache_sysattr_from_link_info(dev, &info);
+        if (r < 0)
+                return r;
 
         /* skip stacked devices, like VLANs, ... */
         if (info.ifindex != (int) info.iflink)
@@ -944,6 +997,15 @@ static int builtin_net_id(sd_device *dev, sd_netlink **rtnl, int argc, char *arg
                 if (snprintf_ok(str, sizeof str, "%s%s", prefix, names.netdevsim_path))
                         udev_builtin_add_property(dev, test, "ID_NET_NAME_PATH", str);
 
+                return 0;
+        }
+
+        /* get xen vif "slot" based names. */
+        if (names_xen(dev, &names) >= 0 && names.type == NET_XENVIF) {
+                char str[ALTIFNAMSIZ];
+
+                if (snprintf_ok(str, sizeof str, "%s%s", prefix, names.xen_slot))
+                        udev_builtin_add_property(dev, test, "ID_NET_NAME_SLOT", str);
                 return 0;
         }
 

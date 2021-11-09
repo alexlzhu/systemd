@@ -156,7 +156,7 @@ static bool filename_possibly_with_slash_suffix(const char *s) {
         if (slash[strspn(slash, "/")] != 0) /* Check that the suffix consist only of one or more slashes */
                 return false;
 
-        copied = strndupa(s, slash - s);
+        copied = strndupa_safe(s, slash - s);
         return filename_is_valid(copied);
 }
 
@@ -413,6 +413,7 @@ bool fstype_is_ro(const char *fstype) {
         return STR_IN_SET(fstype,
                           "DM_verity_hash",
                           "iso9660",
+                          "erofs",
                           "squashfs");
 }
 

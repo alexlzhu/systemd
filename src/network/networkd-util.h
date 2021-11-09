@@ -34,12 +34,12 @@ typedef enum NetworkConfigSource {
 typedef enum NetworkConfigState {
         NETWORK_CONFIG_STATE_PROBING     = 1 << 0, /* address is probing by IPv4ACD */
         NETWORK_CONFIG_STATE_REQUESTING  = 1 << 1, /* request is queued */
-        NETWORK_CONFIG_STATE_CONFIGURING = 1 << 2, /* e.g. address_configure() is called, but no responce is received yet */
+        NETWORK_CONFIG_STATE_CONFIGURING = 1 << 2, /* e.g. address_configure() is called, but no response is received yet */
         NETWORK_CONFIG_STATE_CONFIGURED  = 1 << 3, /* e.g. address_configure() is called and received a response from kernel.
                                                     * Note that address may not be ready yet, so please use address_is_ready()
                                                     * to check whether the address can be usable or not. */
         NETWORK_CONFIG_STATE_MARKED      = 1 << 4, /* used GC'ing the old config */
-        NETWORK_CONFIG_STATE_REMOVING    = 1 << 5, /* e.g. address_remove() is called, but no responce is received yet */
+        NETWORK_CONFIG_STATE_REMOVING    = 1 << 5, /* e.g. address_remove() is called, but no response is received yet */
 } NetworkConfigState;
 
 CONFIG_PARSER_PROTOTYPE(config_parse_link_local_address_family);
@@ -139,8 +139,6 @@ AddressFamily dhcp_deprecated_address_family_from_string(const char *s) _pure_;
 
 const char *dhcp_lease_server_type_to_string(sd_dhcp_lease_server_type_t t) _const_;
 sd_dhcp_lease_server_type_t dhcp_lease_server_type_from_string(const char *s) _pure_;
-
-int kernel_route_expiration_supported(void);
 
 static inline NetworkConfigSection* network_config_section_free(NetworkConfigSection *cs) {
         return mfree(cs);

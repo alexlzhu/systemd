@@ -77,7 +77,7 @@ static int print_status_info(const StatusInfo *i) {
         /* Save the old $TZ */
         tz = getenv("TZ");
         if (tz)
-                old_tz = strdupa(tz);
+                old_tz = strdupa_safe(tz);
 
         /* Set the new $TZ */
         tz_colon = strjoina(":", isempty(i->timezone) ? "UTC" : i->timezone);
@@ -315,7 +315,7 @@ static int list_timezones(int argc, char **argv, void *userdata) {
         if (r < 0)
                 return bus_log_parse_error(r);
 
-        (void) pager_open(arg_pager_flags);
+        pager_open(arg_pager_flags);
         strv_print(zones);
 
         return 0;
@@ -1038,7 +1038,7 @@ static int run(int argc, char *argv[]) {
 
         r = bus_connect_transport(arg_transport, arg_host, false, &bus);
         if (r < 0)
-                return bus_log_connect_error(r);
+                return bus_log_connect_error(r, arg_transport);
 
         return timedatectl_main(bus, argc, argv);
 }

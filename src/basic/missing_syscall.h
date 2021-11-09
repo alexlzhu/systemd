@@ -20,6 +20,7 @@
 #include <asm/sgidefs.h>
 #endif
 
+#include "macro.h"
 #include "missing_keyctl.h"
 #include "missing_stat.h"
 #include "missing_syscall_def.h"
@@ -465,8 +466,16 @@ struct mount_attr;
 #define MOUNT_ATTR_IDMAP 0x00100000
 #endif
 
+#ifndef MOUNT_ATTR_NOSYMFOLLOW
+#define MOUNT_ATTR_NOSYMFOLLOW 0x00200000
+#endif
+
 #ifndef AT_RECURSIVE
 #define AT_RECURSIVE 0x8000
+#endif
+
+#ifndef MOUNT_ATTR_SIZE_VER0
+#define MOUNT_ATTR_SIZE_VER0 32
 #endif
 
 static inline int missing_mount_setattr(
@@ -539,4 +548,20 @@ static inline int missing_move_mount(
 }
 
 #  define move_mount missing_move_mount
+#endif
+
+/* ======================================================================= */
+
+#if !HAVE_GETDENTS64
+
+static inline ssize_t missing_getdents64(int fd, void *buffer, size_t length) {
+#  if defined __NR_getdents64 && __NR_getdents64 >= 0
+        return syscall(__NR_getdents64, fd, buffer, length);
+#  else
+        errno = ENOSYS;
+        return -1;
+#  endif
+}
+
+#  define getdents64 missing_getdents64
 #endif

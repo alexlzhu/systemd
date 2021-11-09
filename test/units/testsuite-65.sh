@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: LGPL-2.1-or-later
 # shellcheck disable=SC2016
 set -eux
 
@@ -55,7 +56,7 @@ EOF
 systemd-analyze verify --recursive-errors=no /tmp/testfile2.service
 
 set +e
-# Non-zero exit status since all associated dependencies are recusively loaded when the unit file is loaded
+# Non-zero exit status since all associated dependencies are recursively loaded when the unit file is loaded
 systemd-analyze verify --recursive-errors=yes /tmp/testfile2.service \
     && { echo 'unexpected success'; exit 1; }
 set -e
@@ -74,6 +75,14 @@ cp /tmp/testfile.service /tmp/.testfile.service
 systemd-analyze verify /tmp/.testfile.service
 
 rm /tmp/.testfile.service
+
+# Alias a unit file's name on disk (see #20061)
+cp /tmp/testfile.service /tmp/testsrvc
+
+systemd-analyze verify /tmp/testsrvc \
+    && { echo 'unexpected success'; exit 1; }
+
+systemd-analyze verify /tmp/testsrvc:alias.service
 
 # Zero exit status since the value used for comparison determine exposure to security threats is by default 100
 systemd-analyze security --offline=true /tmp/testfile.service
@@ -105,9 +114,9 @@ systemd-analyze security --threshold=90 --offline=true --root=/tmp/img/ testfile
 # set to 'yes' (as above in the case of testfile.service) in the content of the unit file, the overall exposure
 # level for the unit file should decrease to account for that increased weight.
 cat <<EOF >/tmp/testfile.json
-{"User_Or_DynamicUser":
+{"UserOrDynamicUser":
     {"description_bad": "Service runs as root user",
-    "weight": 2000,
+    "weight": 0,
     "range": 10
     },
 "SupplementaryGroups":
@@ -191,7 +200,7 @@ cat <<EOF >/tmp/testfile.json
     {"weight": 1000,
     "range": 10
     },
-"RootDirectory_Or_RootImage":
+"RootDirectoryOrRootImage":
     {"description_good": "Service has its own root directory/image",
     "description_bad": "Service runs within the host's root directory",
     "weight": 200,

@@ -1170,7 +1170,7 @@ static void cgroup_apply_restrict_network_interfaces(Unit *u) {
 }
 
 static int cgroup_apply_devices(Unit *u) {
-        _cleanup_(bpf_program_unrefp) BPFProgram *prog = NULL;
+        _cleanup_(bpf_program_freep) BPFProgram *prog = NULL;
         const char *path;
         CGroupContext *c;
         CGroupDeviceAllow *a;
@@ -1244,7 +1244,7 @@ static int cgroup_apply_devices(Unit *u) {
                 policy = CGROUP_DEVICE_POLICY_STRICT;
         }
 
-        r = bpf_devices_apply_policy(prog, policy, any, path, &u->bpf_device_control_installed);
+        r = bpf_devices_apply_policy(&prog, policy, any, path, &u->bpf_device_control_installed);
         if (r < 0) {
                 static bool warned = false;
 
@@ -2232,7 +2232,7 @@ int unit_attach_pids_to_cgroup(Unit *u, Set *pids, const char *suffix_path) {
         CGroupMask delegated_mask;
         const char *p;
         void *pidp;
-        int r, q;
+        int ret, r;
 
         assert(u);
 
@@ -2259,16 +2259,16 @@ int unit_attach_pids_to_cgroup(Unit *u, Set *pids, const char *suffix_path) {
 
         delegated_mask = unit_get_delegate_mask(u);
 
-        r = 0;
+        ret = 0;
         SET_FOREACH(pidp, pids) {
                 pid_t pid = PTR_TO_PID(pidp);
 
                 /* First, attach the PID to the main cgroup hierarchy */
-                q = cg_attach(SYSTEMD_CGROUP_CONTROLLER, p, pid);
-                if (q < 0) {
-                        bool again = MANAGER_IS_USER(u->manager) && ERRNO_IS_PRIVILEGE(q);
+                r = cg_attach(SYSTEMD_CGROUP_CONTROLLER, p, pid);
+                if (r < 0) {
+                        bool again = MANAGER_IS_USER(u->manager) && ERRNO_IS_PRIVILEGE(r);
 
-                        log_unit_full_errno(u, again ? LOG_DEBUG : LOG_INFO,  q,
+                        log_unit_full_errno(u, again ? LOG_DEBUG : LOG_INFO,  r,
                                             "Couldn't move process "PID_FMT" to%s requested cgroup '%s': %m",
                                             pid, again ? " directly" : "", empty_to_root(p));
 
@@ -2287,16 +2287,17 @@ int unit_attach_pids_to_cgroup(Unit *u, Set *pids, const char *suffix_path) {
                                         continue; /* When the bus thing worked via the bus we are fully done for this PID. */
                         }
 
-                        if (r >= 0)
-                                r = q; /* Remember first error */
+                        if (ret >= 0)
+                                ret = r; /* Remember first error */
 
                         continue;
-                }
+                } else if (ret >= 0)
+                        ret++; /* Count successful additions */
 
-                q = cg_all_unified();
-                if (q < 0)
-                        return q;
-                if (q > 0)
+                r = cg_all_unified();
+                if (r < 0)
+                        return r;
+                if (r > 0)
                         continue;
 
                 /* In the legacy hierarchy, attach the process to the request cgroup if possible, and if not to the
@@ -2311,11 +2312,11 @@ int unit_attach_pids_to_cgroup(Unit *u, Set *pids, const char *suffix_path) {
 
                         /* If this controller is delegated and realized, honour the caller's request for the cgroup suffix. */
                         if (delegated_mask & u->cgroup_realized_mask & bit) {
-                                q = cg_attach(cgroup_controller_to_string(c), p, pid);
-                                if (q >= 0)
+                                r = cg_attach(cgroup_controller_to_string(c), p, pid);
+                                if (r >= 0)
                                         continue; /* Success! */
 
-                                log_unit_debug_errno(u, q, "Failed to attach PID " PID_FMT " to requested cgroup %s in controller %s, falling back to unit's cgroup: %m",
+                                log_unit_debug_errno(u, r, "Failed to attach PID " PID_FMT " to requested cgroup %s in controller %s, falling back to unit's cgroup: %m",
                                                      pid, empty_to_root(p), cgroup_controller_to_string(c));
                         }
 
@@ -2326,14 +2327,14 @@ int unit_attach_pids_to_cgroup(Unit *u, Set *pids, const char *suffix_path) {
                         if (!realized)
                                 continue; /* Not even realized in the root slice? Then let's not bother */
 
-                        q = cg_attach(cgroup_controller_to_string(c), realized, pid);
-                        if (q < 0)
-                                log_unit_debug_errno(u, q, "Failed to attach PID " PID_FMT " to realized cgroup %s in controller %s, ignoring: %m",
+                        r = cg_attach(cgroup_controller_to_string(c), realized, pid);
+                        if (r < 0)
+                                log_unit_debug_errno(u, r, "Failed to attach PID " PID_FMT " to realized cgroup %s in controller %s, ignoring: %m",
                                                      pid, realized, cgroup_controller_to_string(c));
                 }
         }
 
-        return r;
+        return ret;
 }
 
 static bool unit_has_mask_realized(
@@ -2767,7 +2768,7 @@ void unit_prune_cgroup(Unit *u) {
         u->cgroup_realized_mask = 0;
         u->cgroup_enabled_mask = 0;
 
-        u->bpf_device_control_installed = bpf_program_unref(u->bpf_device_control_installed);
+        u->bpf_device_control_installed = bpf_program_free(u->bpf_device_control_installed);
 }
 
 int unit_search_main_pid(Unit *u, pid_t *ret) {
@@ -3043,12 +3044,15 @@ int unit_check_oom(Unit *u) {
                 return 0;
 
         r = cg_get_keyed_attribute("memory", u->cgroup_path, "memory.events", STRV_MAKE("oom_kill"), &oom_kill);
-        if (r < 0)
+        if (IN_SET(r, -ENOENT, -ENXIO)) /* Handle gracefully if cgroup or oom_kill attribute don't exist */
+                c = 0;
+        else if (r < 0)
                 return log_unit_debug_errno(u, r, "Failed to read oom_kill field of memory.events cgroup attribute: %m");
-
-        r = safe_atou64(oom_kill, &c);
-        if (r < 0)
-                return log_unit_debug_errno(u, r, "Failed to parse oom_kill field: %m");
+        else {
+                r = safe_atou64(oom_kill, &c);
+                if (r < 0)
+                        return log_unit_debug_errno(u, r, "Failed to parse oom_kill field: %m");
+        }
 
         increased = c > u->oom_kill_last;
         u->oom_kill_last = c;
@@ -3437,7 +3441,7 @@ Unit* manager_get_unit_by_cgroup(Manager *m, const char *cgroup) {
         if (u)
                 return u;
 
-        p = strdupa(cgroup);
+        p = strdupa_safe(cgroup);
         for (;;) {
                 char *e;
 

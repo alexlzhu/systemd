@@ -269,17 +269,17 @@ void user_record_show(UserRecord *hr, bool show_full_group_info) {
                 printf("   IO Weight: %" PRIu64 "\n", hr->io_weight);
 
         if (hr->access_mode != MODE_INVALID)
-                printf(" Access Mode: 0%03oo\n", user_record_access_mode(hr));
+                printf(" Access Mode: 0%03o\n", user_record_access_mode(hr));
 
         if (storage == USER_LUKS) {
                 printf("LUKS Discard: online=%s offline=%s\n", yes_no(user_record_luks_discard(hr)), yes_no(user_record_luks_offline_discard(hr)));
 
                 if (!sd_id128_is_null(hr->luks_uuid))
-                        printf("   LUKS UUID: " SD_ID128_FORMAT_STR "\n", SD_ID128_FORMAT_VAL(hr->luks_uuid));
+                        printf("   LUKS UUID: " SD_ID128_UUID_FORMAT_STR "\n", SD_ID128_FORMAT_VAL(hr->luks_uuid));
                 if (!sd_id128_is_null(hr->partition_uuid))
-                        printf("   Part UUID: " SD_ID128_FORMAT_STR "\n", SD_ID128_FORMAT_VAL(hr->partition_uuid));
+                        printf("   Part UUID: " SD_ID128_UUID_FORMAT_STR "\n", SD_ID128_FORMAT_VAL(hr->partition_uuid));
                 if (!sd_id128_is_null(hr->file_system_uuid))
-                        printf("     FS UUID: " SD_ID128_FORMAT_STR "\n", SD_ID128_FORMAT_VAL(hr->file_system_uuid));
+                        printf("     FS UUID: " SD_ID128_UUID_FORMAT_STR "\n", SD_ID128_FORMAT_VAL(hr->file_system_uuid));
 
                 if (hr->file_system_type)
                         printf(" File System: %s\n", user_record_file_system_type(hr));
@@ -307,6 +307,9 @@ void user_record_show(UserRecord *hr, bool show_full_group_info) {
 
                 if (hr->cifs_service)
                         printf("CIFS Service: %s\n", hr->cifs_service);
+
+                if (hr->cifs_extra_mount_options)
+                        printf("CIFS MntOpts: %s\n", hr->cifs_extra_mount_options);
         }
 
         if (hr->cifs_user_name)
@@ -434,6 +437,9 @@ void user_record_show(UserRecord *hr, bool show_full_group_info) {
 
         if (hr->password_change_now >= 0)
                 printf("Pas. Ch. Now: %s\n", yes_no(hr->password_change_now));
+
+        if (hr->drop_caches >= 0 || user_record_drop_caches(hr))
+                printf(" Drop Caches: %s\n", yes_no(user_record_drop_caches(hr)));
 
         if (!strv_isempty(hr->ssh_authorized_keys))
                 printf("SSH Pub. Key: %zu\n", strv_length(hr->ssh_authorized_keys));

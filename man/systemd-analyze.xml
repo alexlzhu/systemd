@@ -551,7 +551,8 @@ NAutoVTs=8
       <title><command>systemd-analyze verify <replaceable>FILE</replaceable>...</command></title>
 
       <para>This command will load unit files and print warnings if any errors are detected. Files specified
-      on the command line will be loaded, but also any other units referenced by them. The full unit search
+      on the command line will be loaded, but also any other units referenced by them. A unit's name on disk
+      can be overridden by specifying an alias after a colon; see below for an example. The full unit search
       path is formed by combining the directories for all command line arguments, and the usual unit load
       paths. The variable <varname>$SYSTEMD_UNIT_PATH</varname> is supported, and may be used to replace or
       augment the compiled in set of unit load paths; see
@@ -613,6 +614,27 @@ Service a.service not loaded, a.socket cannot be started.
 Service b@0.service not loaded, b.socket cannot be started.
         </programlisting>
       </example>
+
+      <example>
+        <title>Aliasing a unit</title>
+
+        <programlisting>$ cat /tmp/source
+[Unit]
+Description=Hostname printer
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/echo %H
+MysteryKey=true
+
+$ systemd-analyze verify /tmp/source
+Failed to prepare filename /tmp/source: Invalid argument
+
+$ systemd-analyze verify /tmp/source:alias.service
+/tmp/systemd-analyze-XXXXXX/alias.service:7: Unknown key name 'MysteryKey' in section 'Service', ignoring.
+        </programlisting>
+      </example>
+
     </refsect2>
 
     <refsect2>
@@ -1075,9 +1097,14 @@ Service b@0.service not loaded, b.socket cannot be started.
           corresponding to a specific id of the unit file is missing from the JSON object, the
           default built-in field value corresponding to that same id is used for security analysis
           as default. The weight and range fields are used in determining the overall exposure level
-          of the unit files so by allowing users to manipulate these fields, 'security' gives them
-          the option to decide for themself which ids are more important and hence, should have a greater
-          effect on the exposure level. </para>
+          of the unit files: the value of each setting is assigned a badness score, which is multiplied
+          by the policy weight and divided by the policy range to determine the overall exposure that
+          the setting implies. The computed badness is summed across all settings in the unit file,
+          normalized to the 1…100 range, and used to determine the overall exposure level of the unit.
+          By allowing users to manipulate these fields, the 'security' verb gives them the option to
+          decide for themself which ids are more important and hence should have a greater effect on
+          the exposure level. A weight of <literal>0</literal> means the setting will not be
+          checked.</para>
 
           <programlisting>
           {

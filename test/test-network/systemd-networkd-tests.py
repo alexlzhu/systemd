@@ -3,6 +3,7 @@
 # systemd-networkd tests
 
 import argparse
+import errno
 import itertools
 import os
 import re
@@ -13,6 +14,7 @@ import sys
 import time
 import unittest
 from shutil import copytree
+from pathlib import Path
 
 network_unit_file_path='/run/systemd/network'
 networkd_runtime_directory='/run/systemd/netif'
@@ -21,8 +23,12 @@ networkd_ci_path='/run/networkd-ci'
 network_sysctl_ipv6_path='/proc/sys/net/ipv6/conf'
 network_sysctl_ipv4_path='/proc/sys/net/ipv4/conf'
 
-dnsmasq_pid_file='/run/networkd-ci/test-test-dnsmasq.pid'
-dnsmasq_log_file='/run/networkd-ci/test-dnsmasq-log-file'
+dnsmasq_pid_file='/run/networkd-ci/test-dnsmasq.pid'
+dnsmasq_log_file='/run/networkd-ci/test-dnsmasq.log'
+dnsmasq_lease_file='/run/networkd-ci/test-dnsmasq.lease'
+
+isc_dhcpd_pid_file='/run/networkd-ci/test-isc-dhcpd.pid'
+isc_dhcpd_lease_file='/run/networkd-ci/test-isc-dhcpd.lease'
 
 systemd_lib_paths=['/usr/lib/systemd', '/lib/systemd']
 which_paths=':'.join(systemd_lib_paths + os.getenv('PATH', os.defpath).lstrip(':').split(':'))
@@ -41,6 +47,7 @@ env = {}
 asan_options=None
 lsan_options=None
 ubsan_options=None
+with_coverage=False
 
 running_units = []
 
@@ -303,6 +310,11 @@ def setUpModule():
         drop_in += ['SystemCallFilter=']
     if use_valgrind or asan_options or lsan_options or ubsan_options:
         drop_in += ['MemoryDenyWriteExecute=no']
+    if with_coverage:
+        drop_in += [
+            'ProtectSystem=no',
+            'ProtectHome=no',
+        ]
 
     os.makedirs('/run/systemd/system/systemd-networkd.service.d', exist_ok=True)
     with open('/run/systemd/system/systemd-networkd.service.d/00-override.conf', mode='w') as f:
@@ -329,6 +341,11 @@ def setUpModule():
         drop_in += ['SystemCallFilter=']
     if use_valgrind or asan_options or lsan_options or ubsan_options:
         drop_in += ['MemoryDenyWriteExecute=no']
+    if with_coverage:
+        drop_in += [
+            'ProtectSystem=no',
+            'ProtectHome=no',
+        ]
 
     os.makedirs('/run/systemd/system/systemd-resolved.service.d', exist_ok=True)
     with open('/run/systemd/system/systemd-resolved.service.d/00-override.conf', mode='w') as f:
@@ -474,16 +491,28 @@ def remove_networkd_conf_dropin(dropins):
             os.remove(os.path.join(networkd_conf_dropin_path, dropin))
 
 def start_dnsmasq(additional_options='', ipv4_range='192.168.5.10,192.168.5.200', ipv6_range='2600::10,2600::20', lease_time='1h'):
-    dnsmasq_command = f'dnsmasq -8 /var/run/networkd-ci/test-dnsmasq-log-file --log-queries=extra --log-dhcp --pid-file=/var/run/networkd-ci/test-test-dnsmasq.pid --conf-file=/dev/null --interface=veth-peer --enable-ra --dhcp-range={ipv6_range},{lease_time} --dhcp-range={ipv4_range},{lease_time} -R --dhcp-leasefile=/var/run/networkd-ci/lease --dhcp-option=26,1492 --dhcp-option=option:router,192.168.5.1 --port=0 ' + additional_options
+    dnsmasq_command = f'dnsmasq -8 {dnsmasq_log_file} --log-queries=extra --log-dhcp --pid-file={dnsmasq_pid_file} --conf-file=/dev/null --interface=veth-peer --enable-ra --dhcp-range={ipv6_range},{lease_time} --dhcp-range={ipv4_range},{lease_time} -R --dhcp-leasefile={dnsmasq_lease_file} --dhcp-option=26,1492 --dhcp-option=option:router,192.168.5.1 --port=0 ' + additional_options
     check_output(dnsmasq_command)
 
-def stop_dnsmasq(pid_file):
+def stop_by_pid_file(pid_file):
     if os.path.exists(pid_file):
         with open(pid_file, 'r') as f:
             pid = f.read().rstrip(' \t\r\n\0')
             os.kill(int(pid), signal.SIGTERM)
+            for _ in range(25):
+                try:
+                    os.kill(int(pid), 0)
+                    print(f"PID {pid} is still alive, waiting...")
+                    time.sleep(.2)
+                except OSError as e:
+                    if e.errno == errno.ESRCH:
+                        break
+                    print(f"Unexpected exception when waiting for {pid} to die: {e.errno}")
 
         os.remove(pid_file)
+
+def stop_dnsmasq():
+    stop_by_pid_file(dnsmasq_pid_file)
 
 def search_words_in_dnsmasq_log(words, show_all=False):
     if os.path.exists(dnsmasq_log_file):
@@ -498,13 +527,24 @@ def search_words_in_dnsmasq_log(words, show_all=False):
                     return True
     return False
 
-def remove_lease_file():
-    if os.path.exists(os.path.join(networkd_ci_path, 'lease')):
-        os.remove(os.path.join(networkd_ci_path, 'lease'))
+def remove_dnsmasq_lease_file():
+    if os.path.exists(dnsmasq_lease_file):
+        os.remove(dnsmasq_lease_file)
 
-def remove_log_file():
+def remove_dnsmasq_log_file():
     if os.path.exists(dnsmasq_log_file):
         os.remove(dnsmasq_log_file)
+
+def start_isc_dhcpd(interface, conf_file):
+    conf_file_path = os.path.join(networkd_ci_path, conf_file)
+    isc_dhcpd_command = f'dhcpd -6 -cf {conf_file_path} -lf {isc_dhcpd_lease_file} -pf {isc_dhcpd_pid_file} {interface}'
+    Path(isc_dhcpd_lease_file).touch()
+    check_output(isc_dhcpd_command)
+
+def stop_isc_dhcpd():
+    stop_by_pid_file(isc_dhcpd_pid_file)
+    if os.path.exists(isc_dhcpd_lease_file):
+        os.remove(isc_dhcpd_lease_file)
 
 def remove_networkd_state_files():
     if os.path.exists(os.path.join(networkd_runtime_directory, 'state')):
@@ -864,6 +904,7 @@ class NetworkdNetDevTests(unittest.TestCase, Utilities):
         'test1',
         'tun99',
         'vcan99',
+        'veth-mtu',
         'veth99',
         'vlan99',
         'vrf99',
@@ -954,6 +995,7 @@ class NetworkdNetDevTests(unittest.TestCase, Utilities):
         '25-tunnel-remote-any.network',
         '25-tunnel.network',
         '25-vcan.netdev',
+        '25-veth-mtu.netdev',
         '25-veth.netdev',
         '25-vrf.netdev',
         '25-vti6-tunnel-any-any.netdev',
@@ -1242,10 +1284,11 @@ class NetworkdNetDevTests(unittest.TestCase, Utilities):
                 self.assertRegex(output, 'ipvtap  *mode ' + mode.lower() + ' ' + flag)
 
     def test_veth(self):
-        copy_unit_to_networkd_unit_path('25-veth.netdev', 'netdev-link-local-addressing-yes.network')
+        copy_unit_to_networkd_unit_path('25-veth.netdev', 'netdev-link-local-addressing-yes.network',
+                                        '25-veth-mtu.netdev')
         start_networkd()
 
-        self.wait_online(['veth99:degraded', 'veth-peer:degraded'])
+        self.wait_online(['veth99:degraded', 'veth-peer:degraded', 'veth-mtu:degraded', 'veth-mtu-peer:degraded'])
 
         output = check_output('ip -d link show veth99')
         print(output)
@@ -1253,6 +1296,15 @@ class NetworkdNetDevTests(unittest.TestCase, Utilities):
         output = check_output('ip -d link show veth-peer')
         print(output)
         self.assertRegex(output, 'link/ether 12:34:56:78:9a:bd')
+
+        output = check_output('ip -d link show veth-mtu')
+        print(output)
+        self.assertRegex(output, 'link/ether 12:34:56:78:9a:be')
+        self.assertRegex(output, 'mtu 1800')
+        output = check_output('ip -d link show veth-mtu-peer')
+        print(output)
+        self.assertRegex(output, 'link/ether 12:34:56:78:9a:bf')
+        self.assertRegex(output, 'mtu 1800')
 
     def test_tun(self):
         copy_unit_to_networkd_unit_path('25-tun.netdev')
@@ -1962,6 +2014,8 @@ class NetworkdNetworkTests(unittest.TestCase, Utilities):
         self.assertIn('inet 10.2.2.4/16 brd 10.2.255.255 scope global dummy98', output)
         self.assertIn('inet 10.7.8.9/16 brd 10.7.255.255 scope link deprecated dummy98', output)
         self.assertIn('inet 10.8.8.1/16 scope global dummy98', output)
+        self.assertIn('inet 10.8.8.2/16 brd 10.8.8.128 scope global secondary dummy98', output)
+        self.assertRegex(output, 'inet 10.9.0.1/16 (metric 128 |)brd 10.9.255.255 scope global dummy98')
 
         # test for ENOBUFS issue #17012
         for i in range(1,254):
@@ -1982,6 +2036,10 @@ class NetworkdNetworkTests(unittest.TestCase, Utilities):
 
         output = check_output('ip -4 address show dev dummy98 label 35')
         self.assertRegex(output, r'inet 172.[0-9]*.0.1/16 brd 172.[0-9]*.255.255 scope global 35')
+
+        output = check_output('ip -4 route show dev dummy98')
+        print(output)
+        self.assertIn('10.9.0.0/16 proto kernel scope link src 10.9.0.1 metric 128', output)
 
         output = check_output('ip -6 address show dev dummy98')
         print(output)
@@ -2004,8 +2062,8 @@ class NetworkdNetworkTests(unittest.TestCase, Utilities):
         print(output)
         self.assertNotIn('deprecated', output)
 
-        # 2. restart networkd to reconfigure the interface.
-        restart_networkd()
+        # 2. reconfigure the interface.
+        check_output(*networkctl_cmd, 'reconfigure', 'dummy98', env=env)
         self.wait_online(['dummy98:routable'])
 
         # 3. check the deprecated flag is set for the address configured with PreferredLifetime=0
@@ -3204,9 +3262,19 @@ class NetworkdNetworkTests(unittest.TestCase, Utilities):
 
         output = check_output('tc qdisc show dev dummy98')
         print(output)
-        self.assertRegex(output, 'qdisc cake 3a: root')
-        self.assertRegex(output, 'bandwidth 500Mbit')
-        self.assertRegex(output, 'overhead 128')
+        self.assertIn('qdisc cake 3a: root', output)
+        self.assertIn('bandwidth 500Mbit', output)
+        self.assertIn('autorate-ingress', output)
+        self.assertIn('diffserv8', output)
+        self.assertIn('dual-dsthost', output)
+        self.assertIn(' nat', output)
+        self.assertIn(' wash', output)
+        self.assertIn(' split-gso', output)
+        self.assertIn(' raw', output)
+        self.assertIn(' atm', output)
+        self.assertIn('overhead 128', output)
+        self.assertIn('mpu 20', output)
+        self.assertIn('fwmark 0xff00', output)
 
     @expectedFailureIfPIEIsNotAvailable()
     def test_qdisc_pie(self):
@@ -3931,10 +3999,10 @@ class NetworkdDHCPServerTests(unittest.TestCase, Utilities):
 
         output = check_output(*networkctl_cmd, '-n', '0', 'status', 'veth99', env=env)
         print(output)
-        self.assertRegex(output, '192.168.5.*')
-        self.assertRegex(output, 'Gateway: 192.168.5.1')
-        self.assertRegex(output, 'DNS: 192.168.5.1')
-        self.assertRegex(output, 'NTP: 192.168.5.1')
+        self.assertRegex(output, 'Address: 192.168.5.[0-9]* \(DHCP4 via 192.168.5.1\)')
+        self.assertIn('Gateway: 192.168.5.3', output)
+        self.assertIn('DNS: 192.168.5.1', output)
+        self.assertIn('NTP: 192.168.5.1', output)
 
     def test_emit_router_timezone(self):
         copy_unit_to_networkd_unit_path('25-veth.netdev', 'dhcp-client-timezone-router.network', 'dhcp-server-timezone-router.network')
@@ -3943,9 +4011,9 @@ class NetworkdDHCPServerTests(unittest.TestCase, Utilities):
 
         output = check_output(*networkctl_cmd, '-n', '0', 'status', 'veth99', env=env)
         print(output)
-        self.assertRegex(output, 'Gateway: 192.168.5.*')
-        self.assertRegex(output, '192.168.5.*')
-        self.assertRegex(output, 'Europe/Berlin')
+        self.assertRegex(output, 'Address: 192.168.5.[0-9]* \(DHCP4 via 192.168.5.1\)')
+        self.assertIn('Gateway: 192.168.5.1', output)
+        self.assertIn('Time Zone: Europe/Berlin', output)
 
     def test_dhcp_server_static_lease(self):
         copy_unit_to_networkd_unit_path('25-veth.netdev', 'dhcp-client-static-lease.network', 'dhcp-server-static-lease.network')
@@ -3954,7 +4022,7 @@ class NetworkdDHCPServerTests(unittest.TestCase, Utilities):
 
         output = check_output(*networkctl_cmd, '-n', '0', 'status', 'veth99', env=env)
         print(output)
-        self.assertIn('10.1.1.200 (DHCP4 via 10.1.1.1)', output)
+        self.assertIn('Address: 10.1.1.200 (DHCP4 via 10.1.1.1)', output)
 
 class NetworkdDHCPServerRelayAgentTests(unittest.TestCase, Utilities):
     links = [
@@ -4012,7 +4080,6 @@ class NetworkdDHCPClientTests(unittest.TestCase, Utilities):
         'dhcp-client-ipv4-only.network',
         'dhcp-client-ipv4-use-routes-use-gateway.network',
         'dhcp-client-ipv6-only.network',
-        'dhcp-client-ipv6-rapid-commit.network',
         'dhcp-client-keep-configuration-dhcp-on-stop.network',
         'dhcp-client-keep-configuration-dhcp.network',
         'dhcp-client-listen-port.network',
@@ -4035,14 +4102,16 @@ class NetworkdDHCPClientTests(unittest.TestCase, Utilities):
         'static.network']
 
     def setUp(self):
-        stop_dnsmasq(dnsmasq_pid_file)
+        stop_dnsmasq()
+        remove_dnsmasq_lease_file()
+        remove_dnsmasq_log_file()
         remove_links(self.links)
         stop_networkd(show_logs=False)
 
     def tearDown(self):
-        stop_dnsmasq(dnsmasq_pid_file)
-        remove_lease_file()
-        remove_log_file()
+        stop_dnsmasq()
+        remove_dnsmasq_lease_file()
+        remove_dnsmasq_log_file()
         remove_links(self.links)
         remove_unit_from_networkd_path(self.units)
         stop_networkd(show_logs=True)
@@ -4093,7 +4162,7 @@ class NetworkdDHCPClientTests(unittest.TestCase, Utilities):
         self.assertRegex(output, r'192.168.5.6 proto dhcp scope link src 192.168.5.181 metric 1024')
         self.assertRegex(output, r'192.168.5.7 proto dhcp scope link src 192.168.5.181 metric 1024')
 
-        stop_dnsmasq(dnsmasq_pid_file)
+        stop_dnsmasq()
         start_dnsmasq(additional_options='--dhcp-option=option:dns-server,192.168.5.1,192.168.5.7,192.168.5.8', lease_time='2m')
 
         # Sleep for 120 sec as the dnsmasq minimum lease time can only be set to 120
@@ -4193,8 +4262,7 @@ class NetworkdDHCPClientTests(unittest.TestCase, Utilities):
             self.assertNotRegex(output, r'9.9.9.9 via 192.168.5.[0-9]* proto dhcp src 192.168.5.[0-9]* metric 1024')
 
     def test_dhcp_client_ipv4_ipv6(self):
-        copy_unit_to_networkd_unit_path('25-veth.netdev', 'dhcp-server-veth-peer.network', 'dhcp-client-ipv6-only.network',
-                                        'dhcp-client-ipv4-only.network')
+        copy_unit_to_networkd_unit_path('25-veth.netdev', 'dhcp-server-veth-peer.network', 'dhcp-client-ipv4-only.network')
         start_networkd()
         self.wait_online(['veth-peer:carrier'])
         start_dnsmasq()
@@ -4246,30 +4314,6 @@ class NetworkdDHCPClientTests(unittest.TestCase, Utilities):
         self.assertTrue(search_words_in_dnsmasq_log('DHCPDISCOVER(veth-peer) 12:34:56:78:9a:bc'))
         self.assertTrue(search_words_in_dnsmasq_log('client provides name: test-hostname'))
         self.assertTrue(search_words_in_dnsmasq_log('26:mtu'))
-
-    def test_dhcp6_client_settings_rapidcommit_true(self):
-        copy_unit_to_networkd_unit_path('25-veth.netdev', 'dhcp-server-veth-peer.network', 'dhcp-client-ipv6-only.network')
-        start_networkd()
-        self.wait_online(['veth-peer:carrier'])
-        start_dnsmasq()
-        self.wait_online(['veth99:routable', 'veth-peer:routable'])
-
-        output = check_output('ip address show dev veth99')
-        print(output)
-        self.assertRegex(output, '12:34:56:78:9a:bc')
-        self.assertTrue(search_words_in_dnsmasq_log('14:rapid-commit', True))
-
-    def test_dhcp6_client_settings_rapidcommit_false(self):
-        copy_unit_to_networkd_unit_path('25-veth.netdev', 'dhcp-server-veth-peer.network', 'dhcp-client-ipv6-rapid-commit.network')
-        start_networkd()
-        self.wait_online(['veth-peer:carrier'])
-        start_dnsmasq()
-        self.wait_online(['veth99:routable', 'veth-peer:routable'])
-
-        output = check_output('ip address show dev veth99')
-        print(output)
-        self.assertRegex(output, '12:34:56:78:9a:bc')
-        self.assertFalse(search_words_in_dnsmasq_log('14:rapid-commit', True))
 
     def test_dhcp_client_settings_anonymize(self):
         copy_unit_to_networkd_unit_path('25-veth.netdev', 'dhcp-server-veth-peer.network', 'dhcp-client-anonymize.network')
@@ -4356,7 +4400,7 @@ class NetworkdDHCPClientTests(unittest.TestCase, Utilities):
         self.assertRegex(output, r'192.168.6.0/24 proto static')
         self.assertRegex(output, r'192.168.7.0/24 proto static')
 
-        stop_dnsmasq(dnsmasq_pid_file)
+        stop_dnsmasq()
         start_dnsmasq(ipv4_range='192.168.5.210,192.168.5.220', lease_time='2m')
 
         # Sleep for 120 sec as the dnsmasq minimum lease time can only be set to 120
@@ -4389,7 +4433,7 @@ class NetworkdDHCPClientTests(unittest.TestCase, Utilities):
         self.assertRegex(output, r'2600::/64 proto ra metric 1024')
         self.assertRegex(output, r'2600:0:0:1::/64 proto static metric 1024 pref medium')
 
-        stop_dnsmasq(dnsmasq_pid_file)
+        stop_dnsmasq()
         start_dnsmasq(ipv6_range='2600::30,2600::40', lease_time='2m')
 
         # Sleep for 120 sec as the dnsmasq minimum lease time can only be set to 120
@@ -4419,7 +4463,7 @@ class NetworkdDHCPClientTests(unittest.TestCase, Utilities):
         self.assertRegex(output, r'192.168.5.*')
 
         # Stopping dnsmasq as networkd won't be allowed to renew the DHCP lease.
-        stop_dnsmasq(dnsmasq_pid_file)
+        stop_dnsmasq()
 
         # Sleep for 120 sec as the dnsmasq minimum lease time can only be set to 120
         print('Wait for the dynamic address to be expired')
@@ -4469,7 +4513,7 @@ class NetworkdDHCPClientTests(unittest.TestCase, Utilities):
         print(output)
         self.assertRegex(output, r'192.168.5.*')
 
-        stop_dnsmasq(dnsmasq_pid_file)
+        stop_dnsmasq()
         check_output('systemctl stop systemd-networkd.socket')
         check_output('systemctl stop systemd-networkd.service')
 
@@ -4712,7 +4756,7 @@ class NetworkdDHCPClientTests(unittest.TestCase, Utilities):
         self.assertRegex(output, f'default via 192.168.5.1 proto dhcp src {address1} metric 1024')
         self.assertRegex(output, f'192.168.5.1 proto dhcp scope link src {address1} metric 1024')
 
-        stop_dnsmasq(dnsmasq_pid_file)
+        stop_dnsmasq()
         start_dnsmasq(ipv4_range='192.168.5.200,192.168.5.250', lease_time='2m')
 
         print('Wait for the dynamic address to be expired')
@@ -4845,6 +4889,184 @@ class NetworkdDHCPClientTests(unittest.TestCase, Utilities):
         print(output)
         self.assertRegex(output, 'inet 192.168.5.[0-9]*/24 metric 1024 brd 192.168.5.255 scope global dynamic veth99')
 
+class NetworkdDHCP6PDTests(unittest.TestCase, Utilities):
+    links = [
+        'dummy97',
+        'dummy98',
+        'dummy99',
+        'test1',
+        'veth98',
+        'veth99',
+    ]
+
+    units = [
+        '11-dummy.netdev',
+        '12-dummy.netdev',
+        '13-dummy.netdev',
+        '25-veth.netdev',
+        '25-veth-downstream.netdev',
+        'dhcp6pd-downstream-dummy97.network',
+        'dhcp6pd-downstream-dummy98.network',
+        'dhcp6pd-downstream-dummy99.network',
+        'dhcp6pd-downstream-test1.network',
+        'dhcp6pd-downstream-veth98.network',
+        'dhcp6pd-downstream-veth98-peer.network',
+        'dhcp6pd-server.network',
+        'dhcp6pd-upstream.network',
+    ]
+
+    def setUp(self):
+        stop_isc_dhcpd()
+        remove_links(self.links)
+        stop_networkd(show_logs=False)
+
+    def tearDown(self):
+        stop_isc_dhcpd()
+        remove_links(self.links)
+        remove_unit_from_networkd_path(self.units)
+        stop_networkd(show_logs=True)
+
+    def test_dhcp6pd(self):
+        copy_unit_to_networkd_unit_path('25-veth.netdev', 'dhcp6pd-server.network', 'dhcp6pd-upstream.network',
+                                        '25-veth-downstream.netdev', 'dhcp6pd-downstream-veth98.network', 'dhcp6pd-downstream-veth98-peer.network',
+                                        '11-dummy.netdev', 'dhcp6pd-downstream-test1.network',
+                                        'dhcp6pd-downstream-dummy97.network',
+                                        '12-dummy.netdev', 'dhcp6pd-downstream-dummy98.network',
+                                        '13-dummy.netdev', 'dhcp6pd-downstream-dummy99.network')
+
+        start_networkd()
+        self.wait_online(['veth-peer:carrier'])
+        start_isc_dhcpd('veth-peer', 'isc-dhcpd-dhcp6pd.conf')
+        self.wait_online(['veth-peer:routable', 'veth99:routable', 'test1:routable', 'dummy98:routable', 'dummy99:degraded',
+                          'veth98:routable', 'veth98-peer:routable'])
+
+        print('### ip -6 address show dev veth-peer scope global')
+        output = check_output('ip -6 address show dev veth-peer scope global')
+        print(output)
+        self.assertIn('inet6 3ffe:501:ffff:100::1/64 scope global', output)
+
+        print('### ip -6 address show dev veth99 scope global')
+        output = check_output('ip -6 address show dev veth99 scope global')
+        print(output)
+        # IA_NA
+        self.assertRegex(output, 'inet6 3ffe:501:ffff:100::[0-9]*/128 scope global (dynamic noprefixroute|noprefixroute dynamic)')
+        # address in IA_PD (Token=static)
+        self.assertRegex(output, 'inet6 3ffe:501:ffff:[2-9a-f]10:1a:2b:3c:4d/64 (metric 256 |)scope global dynamic mngtmpaddr')
+        # address in IA_PD (Token=eui64)
+        self.assertRegex(output, 'inet6 3ffe:501:ffff:[2-9a-f]10:1034:56ff:fe78:9abc/64 (metric 256 |)scope global dynamic mngtmpaddr')
+        # address in IA_PD (temporary)
+        # Note that the temporary addresses may appear after the link enters configured state
+        self.wait_address('veth99', 'inet6 3ffe:501:ffff:[2-9a-f]10:[0-9a-f]*:[0-9a-f]*:[0-9a-f]*:[0-9a-f]*/64 (metric 256 |)scope global temporary dynamic', ipv='-6')
+
+        print('### ip -6 address show dev test1 scope global')
+        output = check_output('ip -6 address show dev test1 scope global')
+        print(output)
+        # address in IA_PD (Token=static)
+        self.assertRegex(output, 'inet6 3ffe:501:ffff:[2-9a-f]00:1a:2b:3c:4d/64 (metric 256 |)scope global dynamic mngtmpaddr')
+        # address in IA_PD (temporary)
+        self.wait_address('test1', 'inet6 3ffe:501:ffff:[2-9a-f]00:[0-9a-f]*:[0-9a-f]*:[0-9a-f]*:[0-9a-f]*/64 (metric 256 |)scope global temporary dynamic', ipv='-6')
+
+        print('### ip -6 address show dev dummy98 scope global')
+        output = check_output('ip -6 address show dev dummy98 scope global')
+        print(output)
+        # address in IA_PD (Token=static)
+        self.assertRegex(output, 'inet6 3ffe:501:ffff:[2-9a-f]03:1a:2b:3c:4d/64 (metric 256 |)scope global dynamic mngtmpaddr')
+        # address in IA_PD (temporary)
+        self.wait_address('dummy98', 'inet6 3ffe:501:ffff:[2-9a-f]03:[0-9a-f]*:[0-9a-f]*:[0-9a-f]*:[0-9a-f]*/64 (metric 256 |)scope global temporary dynamic', ipv='-6')
+
+        print('### ip -6 address show dev veth98 scope global')
+        output = check_output('ip -6 address show dev veth98 scope global')
+        print(output)
+        # address in IA_PD (Token=static)
+        self.assertRegex(output, 'inet6 3ffe:501:ffff:[2-9a-f]09:1a:2b:3c:4d/64 (metric 256 |)scope global dynamic mngtmpaddr')
+        # address in IA_PD (Token=eui64)
+        self.assertRegex(output, 'inet6 3ffe:501:ffff:[2-9a-f]09:1034:56ff:fe78:9abe/64 (metric 256 |)scope global dynamic mngtmpaddr')
+        # address in IA_PD (temporary)
+        self.wait_address('veth98', 'inet6 3ffe:501:ffff:[2-9a-f]09:[0-9a-f]*:[0-9a-f]*:[0-9a-f]*:[0-9a-f]*/64 (metric 256 |)scope global temporary dynamic', ipv='-6')
+
+        print('### ip -6 address show dev veth98-peer scope global')
+        output = check_output('ip -6 address show dev veth98-peer scope global')
+        print(output)
+        # NDisc address (Token=static)
+        self.assertRegex(output, 'inet6 3ffe:501:ffff:[2-9a-f]09:1a:2b:3c:4e/64 (metric 256 |)scope global dynamic mngtmpaddr')
+        # NDisc address (Token=eui64)
+        self.assertRegex(output, 'inet6 3ffe:501:ffff:[2-9a-f]09:1034:56ff:fe78:9abf/64 (metric 256 |)scope global dynamic mngtmpaddr')
+        # NDisc address (temporary)
+        self.wait_address('veth98-peer', 'inet6 3ffe:501:ffff:[2-9a-f]09:[0-9a-f]*:[0-9a-f]*:[0-9a-f]*:[0-9a-f]*/64 (metric 256 |)scope global temporary dynamic', ipv='-6')
+
+        print('### ip -6 address show dev dummy99 scope global')
+        output = check_output('ip -6 address show dev dummy98 scope global')
+        print(output)
+
+        print('### ip -6 route show type unreachable')
+        output = check_output('ip -6 route show type unreachable')
+        print(output)
+        self.assertRegex(output, 'unreachable 3ffe:501:ffff:[2-9a-f]00::/56 dev lo proto dhcp')
+
+        print('### ip -6 route show dev veth99')
+        output = check_output('ip -6 route show dev veth99')
+        print(output)
+        self.assertRegex(output, '3ffe:501:ffff:[2-9a-f]10::/64 proto kernel metric [0-9]* expires')
+
+        print('### ip -6 route show dev test1')
+        output = check_output('ip -6 route show dev test1')
+        print(output)
+        self.assertRegex(output, '3ffe:501:ffff:[2-9a-f]00::/64 proto kernel metric [0-9]* expires')
+
+        print('### ip -6 route show dev dummy98')
+        output = check_output('ip -6 route show dev dummy98')
+        print(output)
+        self.assertRegex(output, '3ffe:501:ffff:[2-9a-f]03::/64 proto kernel metric [0-9]* expires')
+
+        print('### ip -6 route show dev dummy99')
+        output = check_output('ip -6 route show dev dummy99')
+        print(output)
+        self.assertRegex(output, '3ffe:501:ffff:[2-9a-f]01::/64 proto dhcp metric [0-9]* expires')
+
+        print('### ip -6 route show dev veth98')
+        output = check_output('ip -6 route show dev veth98')
+        print(output)
+        self.assertRegex(output, '3ffe:501:ffff:[2-9a-f]09::/64 proto kernel metric [0-9]* expires')
+
+        print('### ip -6 route show dev veth98-peer')
+        output = check_output('ip -6 route show dev veth98-peer')
+        print(output)
+        self.assertRegex(output, '3ffe:501:ffff:[2-9a-f]09::/64 proto ra metric [0-9]* expires')
+
+        # Test case for a downstream which appears later
+        check_output('ip link add dummy97 type dummy')
+        self.wait_online(['dummy97:routable'])
+
+        print('### ip -6 address show dev dummy97 scope global')
+        output = check_output('ip -6 address show dev dummy97 scope global')
+        print(output)
+        # address in IA_PD (Token=static)
+        self.assertRegex(output, 'inet6 3ffe:501:ffff:[2-9a-f]06:1a:2b:3c:4d/64 (metric 256 |)scope global dynamic mngtmpaddr')
+        # address in IA_PD (temporary)
+        self.wait_address('dummy97', 'inet6 3ffe:501:ffff:[2-9a-f]06:[0-9a-f]*:[0-9a-f]*:[0-9a-f]*:[0-9a-f]*/64 (metric 256 |)scope global temporary dynamic', ipv='-6')
+
+        print('### ip -6 route show dev dummy97')
+        output = check_output('ip -6 route show dev dummy97')
+        print(output)
+        self.assertRegex(output, '3ffe:501:ffff:[2-9a-f]06::/64 proto kernel metric [0-9]* expires')
+
+        # Test case for reconfigure
+        check_output(*networkctl_cmd, 'reconfigure', 'dummy98', env=env)
+        self.wait_online(['dummy98:routable'])
+
+        print('### ip -6 address show dev dummy98 scope global')
+        output = check_output('ip -6 address show dev dummy98 scope global')
+        print(output)
+        # address in IA_PD (Token=static)
+        self.assertRegex(output, 'inet6 3ffe:501:ffff:[2-9a-f]03:1a:2b:3c:4d/64 (metric 256 |)scope global dynamic mngtmpaddr')
+        # address in IA_PD (temporary)
+        self.wait_address('dummy98', 'inet6 3ffe:501:ffff:[2-9a-f]03:[0-9a-f]*:[0-9a-f]*:[0-9a-f]*:[0-9a-f]*/64 (metric 256 |)scope global temporary dynamic', ipv='-6')
+
+        print('### ip -6 route show dev dummy98')
+        output = check_output('ip -6 route show dev dummy98')
+        print(output)
+        self.assertRegex(output, '3ffe:501:ffff:[2-9a-f]03::/64 proto kernel metric [0-9]* expires')
+
 class NetworkdIPv6PrefixTests(unittest.TestCase, Utilities):
     links = [
         'dummy98',
@@ -4865,7 +5087,6 @@ class NetworkdIPv6PrefixTests(unittest.TestCase, Utilities):
         stop_networkd(show_logs=False)
 
     def tearDown(self):
-        remove_log_file()
         remove_links(self.links)
         remove_unit_from_networkd_path(self.units)
         stop_networkd(show_logs=True)
@@ -4954,7 +5175,6 @@ class NetworkdMTUTests(unittest.TestCase, Utilities):
         stop_networkd(show_logs=False)
 
     def tearDown(self):
-        remove_log_file()
         remove_links(self.links)
         remove_unit_from_networkd_path(self.units)
         stop_networkd(show_logs=True)
@@ -5049,6 +5269,7 @@ if __name__ == '__main__':
     parser.add_argument('--asan-options', help='ASAN options', dest='asan_options')
     parser.add_argument('--lsan-options', help='LSAN options', dest='lsan_options')
     parser.add_argument('--ubsan-options', help='UBSAN options', dest='ubsan_options')
+    parser.add_argument('--with-coverage', help='Loosen certain sandbox restrictions to make gcov happy', dest='with_coverage', type=bool, nargs='?', const=True, default=with_coverage)
     ns, args = parser.parse_known_args(namespace=unittest)
 
     if ns.build_dir:
@@ -5082,6 +5303,7 @@ if __name__ == '__main__':
     asan_options = ns.asan_options
     lsan_options = ns.lsan_options
     ubsan_options = ns.ubsan_options
+    with_coverage = ns.with_coverage
 
     if use_valgrind:
         networkctl_cmd = ['valgrind', '--track-origins=yes', '--leak-check=full', '--show-leak-kinds=all', networkctl_bin]

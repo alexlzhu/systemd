@@ -191,8 +191,8 @@ static int run(int argc, char *argv[]) {
         if (r <= 0)
                 return r;
 
-        r = pager_open(arg_pager_flags);
-        if (r > 0 && arg_full < 0)
+        pager_open(arg_pager_flags);
+        if (arg_full < 0 && pager_have())
                 arg_full = true;
 
         if (arg_full > 0)
@@ -216,7 +216,7 @@ static int run(int argc, char *argv[]) {
                                                                           arg_show_unit == SHOW_UNIT_USER,
                                                                           &bus);
                                         if (r < 0)
-                                                return bus_log_connect_error(r);
+                                                return bus_log_connect_error(r, BUS_TRANSPORT_LOCAL);
                                 }
 
                                 q = show_cgroup_get_unit_path_and_warn(bus, *name, &cgroup);

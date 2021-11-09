@@ -222,6 +222,7 @@ _noreturn_ static void freeze_or_exit_or_reboot(void) {
         }
 
         log_emergency("Freezing execution.");
+        sync();
         freeze();
 }
 
@@ -537,6 +538,25 @@ static int parse_proc_cmdline_item(const char *key, const char *value, void *dat
 
                 (void) parse_path_argument(value, false, &arg_watchdog_device);
 
+        } else if (proc_cmdline_key_streq(key, "systemd.watchdog_sec")) {
+
+                if (proc_cmdline_value_missing(key, value))
+                        return 0;
+
+                if (streq(value, "default"))
+                        arg_runtime_watchdog = USEC_INFINITY;
+                else if (streq(value, "off"))
+                        arg_runtime_watchdog = 0;
+                else {
+                        r = parse_sec(value, &arg_runtime_watchdog);
+                        if (r < 0) {
+                                log_warning_errno(r, "Failed to parse systemd.watchdog_sec= argument '%s', ignoring: %m", value);
+                                return 0;
+                        }
+                }
+
+                arg_kexec_watchdog = arg_reboot_watchdog = arg_runtime_watchdog;
+
         } else if (proc_cmdline_key_streq(key, "systemd.clock_usec")) {
 
                 if (proc_cmdline_value_missing(key, value))
@@ -688,10 +708,10 @@ static int parse_config_file(void) {
                 { "Manager", "NUMAPolicy",                   config_parse_numa_policy,           0, &arg_numa_policy.type                  },
                 { "Manager", "NUMAMask",                     config_parse_numa_mask,             0, &arg_numa_policy                       },
                 { "Manager", "JoinControllers",              config_parse_warn_compat,           DISABLED_CONFIGURATION, NULL              },
-                { "Manager", "RuntimeWatchdogSec",           config_parse_sec,                   0, &arg_runtime_watchdog                  },
-                { "Manager", "RebootWatchdogSec",            config_parse_sec,                   0, &arg_reboot_watchdog                   },
-                { "Manager", "ShutdownWatchdogSec",          config_parse_sec,                   0, &arg_reboot_watchdog                   }, /* obsolete alias */
-                { "Manager", "KExecWatchdogSec",             config_parse_sec,                   0, &arg_kexec_watchdog                    },
+                { "Manager", "RuntimeWatchdogSec",           config_parse_watchdog_sec,          0, &arg_runtime_watchdog                  },
+                { "Manager", "RebootWatchdogSec",            config_parse_watchdog_sec,          0, &arg_reboot_watchdog                   },
+                { "Manager", "ShutdownWatchdogSec",          config_parse_watchdog_sec,          0, &arg_reboot_watchdog                   }, /* obsolete alias */
+                { "Manager", "KExecWatchdogSec",             config_parse_watchdog_sec,          0, &arg_kexec_watchdog                    },
                 { "Manager", "WatchdogDevice",               config_parse_path,                  0, &arg_watchdog_device                   },
                 { "Manager", "CapabilityBoundingSet",        config_parse_capability_set,        0, &arg_capability_bounding_set           },
                 { "Manager", "NoNewPrivileges",              config_parse_bool,                  0, &arg_no_new_privs                      },
@@ -1523,9 +1543,9 @@ static int become_shutdown(
         };
 
         _cleanup_strv_free_ char **env_block = NULL;
+        usec_t watchdog_timer = 0;
         size_t pos = 7;
         int r;
-        usec_t watchdog_timer = 0;
 
         assert(shutdown_verb);
         assert(!command_line[pos]);
@@ -1574,19 +1594,16 @@ static int become_shutdown(
         else if (streq(shutdown_verb, "kexec"))
                 watchdog_timer = arg_kexec_watchdog;
 
-        if (timestamp_is_set(watchdog_timer)) {
-                /* If we reboot or kexec let's set the shutdown watchdog and tell the shutdown binary to
-                 * repeatedly ping it */
-                r = watchdog_setup(watchdog_timer);
-                watchdog_close(r < 0);
+        /* If we reboot or kexec let's set the shutdown watchdog and tell the
+         * shutdown binary to repeatedly ping it */
+        r = watchdog_setup(watchdog_timer);
+        watchdog_close(r < 0);
 
-                /* Tell the binary how often to ping, ignore failure */
-                (void) strv_extendf(&env_block, "WATCHDOG_USEC="USEC_FMT, watchdog_timer);
+        /* Tell the binary how often to ping, ignore failure */
+        (void) strv_extendf(&env_block, "WATCHDOG_USEC="USEC_FMT, watchdog_timer);
 
-                if (arg_watchdog_device)
-                        (void) strv_extendf(&env_block, "WATCHDOG_DEVICE=%s", arg_watchdog_device);
-        } else
-                watchdog_close(true);
+        if (arg_watchdog_device)
+                (void) strv_extendf(&env_block, "WATCHDOG_DEVICE=%s", arg_watchdog_device);
 
         /* Avoid the creation of new processes forked by the kernel; at this
          * point, we will not listen to the signals anyway */
@@ -2885,7 +2902,7 @@ int main(int argc, char *argv[]) {
                 goto finish;
 
         if (IN_SET(arg_action, ACTION_TEST, ACTION_HELP, ACTION_DUMP_CONFIGURATION_ITEMS, ACTION_DUMP_BUS_PROPERTIES, ACTION_BUS_INTROSPECT))
-                (void) pager_open(arg_pager_flags);
+                pager_open(arg_pager_flags);
 
         if (arg_action != ACTION_RUN)
                 skip_setup = true;

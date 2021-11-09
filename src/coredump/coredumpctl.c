@@ -563,6 +563,8 @@ static int print_info(FILE *file, sd_journal *j, bool need_space) {
         assert(file);
         assert(j);
 
+        (void) sd_journal_set_data_threshold(j, 0);
+
         SD_JOURNAL_FOREACH_DATA(j, d, l) {
                 RETRIEVE(d, l, "MESSAGE_ID", mid);
                 RETRIEVE(d, l, "COREDUMP_PID", pid);
@@ -822,7 +824,7 @@ static int dump_list(int argc, char **argv, void *userdata) {
 
                 (void) table_set_empty_string(t, "-");
         } else
-                (void) pager_open(arg_pager_flags);
+                pager_open(arg_pager_flags);
 
         /* "info" without pattern implies "-1" */
         if ((arg_rows_max == 1 && arg_reverse) || (verb_is_info && argc == 1)) {

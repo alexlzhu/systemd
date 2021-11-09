@@ -139,6 +139,8 @@ All execution-related settings are available for transient units.
 ✓ TTYReset=
 ✓ TTYVHangup=
 ✓ TTYVTDisallocate=
+✓ TTYRows=
+✓ TTYColumns=
 ✓ SyslogIdentifier=
 ✓ SyslogFacility=
 ✓ SyslogLevel=
@@ -307,6 +309,7 @@ Most service unit settings are available for transient units.
 ✓ ExecStartPre=
 ✓ ExecStop=
 ✓ ExecStopPost=
+✓ ExitType=
 ✓ FileDescriptorStoreMax=
 ✓ GuessMainPID=
 ✓ NonBlocking=

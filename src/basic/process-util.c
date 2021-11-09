@@ -857,8 +857,8 @@ int wait_for_terminate_with_timeout(pid_t pid, usec_t timeout) {
 void sigkill_wait(pid_t pid) {
         assert(pid > 1);
 
-        if (kill(pid, SIGKILL) >= 0)
-                (void) wait_for_terminate(pid, NULL);
+        (void) kill(pid, SIGKILL);
+        (void) wait_for_terminate(pid, NULL);
 }
 
 void sigkill_waitp(pid_t *pid) {
@@ -875,8 +875,8 @@ void sigkill_waitp(pid_t *pid) {
 void sigterm_wait(pid_t pid) {
         assert(pid > 1);
 
-        if (kill_and_sigcont(pid, SIGTERM) >= 0)
-                (void) wait_for_terminate(pid, NULL);
+        (void) kill_and_sigcont(pid, SIGTERM);
+        (void) wait_for_terminate(pid, NULL);
 }
 
 int kill_and_sigcont(pid_t pid, int sig) {
@@ -1246,7 +1246,7 @@ static void restore_sigsetp(sigset_t **ssp) {
 
 int safe_fork_full(
                 const char *name,
-                int except_fds[],
+                const int except_fds[],
                 size_t n_except_fds,
                 ForkFlags flags,
                 pid_t *ret_pid) {
@@ -1441,7 +1441,7 @@ int safe_fork_full(
 int namespace_fork(
                 const char *outer_name,
                 const char *inner_name,
-                int except_fds[],
+                const int except_fds[],
                 size_t n_except_fds,
                 ForkFlags flags,
                 int pidns_fd,
@@ -1457,8 +1457,7 @@ int namespace_fork(
          * process. This ensures that we are fully a member of the destination namespace, with pidns an all, so that
          * /proc/self/fd works correctly. */
 
-        r = safe_fork_full(outer_name, except_fds, n_except_fds,
-                           (flags|FORK_DEATHSIG) & ~(FORK_REOPEN_LOG|FORK_NEW_MOUNTNS|FORK_MOUNTNS_SLAVE), ret_pid);
+        r = safe_fork_full(outer_name, except_fds, n_except_fds, (flags|FORK_DEATHSIG) & ~(FORK_REOPEN_LOG|FORK_NEW_MOUNTNS|FORK_MOUNTNS_SLAVE), ret_pid);
         if (r < 0)
                 return r;
         if (r == 0) {
@@ -1616,6 +1615,27 @@ bool invoked_as(char *argv[], const char *token) {
                 return false;
 
         return strstr(last_path_component(argv[0]), token);
+}
+
+_noreturn_ void freeze(void) {
+        log_close();
+
+        /* Make sure nobody waits for us (i.e. on one of our sockets) anymore. Note that we use
+         * close_all_fds_without_malloc() instead of plain close_all_fds() here, since we want this function
+         * to be compatible with being called from signal handlers. */
+        (void) close_all_fds_without_malloc(NULL, 0);
+
+        /* Let's not freeze right away, but keep reaping zombies. */
+        for (;;) {
+                siginfo_t si = {};
+
+                if (waitid(P_ALL, 0, &si, WEXITED) < 0 && errno != EINTR)
+                        break;
+        }
+
+        /* waitid() failed with an unexpected error, things are really borked. Freeze now! */
+        for (;;)
+                pause();
 }
 
 static const char *const ioprio_class_table[] = {

@@ -50,6 +50,10 @@ All tools:
   useful for debugging. Currently only supported by
   `systemd-cryptsetup-generator`.
 
+* `$SYSTEMD_INTEGRITYTAB` — if set, use this path instead of
+  `/etc/integritytab`. Only useful for debugging. Currently only supported by
+  `systemd-integritysetup-generator`.
+
 * `$SYSTEMD_VERITYTAB` — if set, use this path instead of
   `/etc/veritytab`. Only useful for debugging. Currently only supported by
   `systemd-veritysetup-generator`.
@@ -133,6 +137,12 @@ All tools:
 
 * `$SYSTEMD_NSPAWN_TMPFS_TMP=0` — if set, do not overmount `/tmp/` in the
   container with a tmpfs, but leave the directory from the image in place.
+
+* `$SYSTEMD_SUPPRESS_SYNC=1` — if set, all disk synchronization syscalls are
+  blocked to the container payload (e.g. `sync()`, `fsync()`, `syncfs()`, …)
+  and the `O_SYNC`/`O_DSYNC` flags are made unavailable to `open()` and
+  friends. This is equivalent to passing `--suppress-sync=yes` on the
+  `systemd-nspawn` command line.
 
 `systemd-logind`:
 
@@ -362,5 +372,64 @@ disk images with `--image=` or similar:
   to validate the signature of the Verity root hash if available. If enabled
   (which is the default), the signature of suitable disk images is validated
   against any of the certificates in `/etc/verity.d/*.crt` (and similar
-  directores in `/usr/lib/`, `/run`, …) or passed to the kernel for validation
+  directories in `/usr/lib/`, `/run`, …) or passed to the kernel for validation
   against its built-in certificates.
+
+* `$SYSTEMD_LOOP_DIRECT_IO` – takes a boolean, which controls whether to enable
+  LO_FLAGS_DIRECT_IO (i.e. direct IO + asynchronous IO) on loopback block
+  devices when opening them. Defaults to on, set this to "0" to disable this
+  feature.
+
+`systemd-cryptsetup`:
+
+* `$SYSTEMD_CRYPTSETUP_USE_TOKEN_MODULE` – takes a boolean, which controls
+  whether to use the libcryptsetup "token" plugin module logic even when
+  activating via FIDO2, PKCS#11, TPM2, i.e. mechanisms natively supported by
+  `systemd-cryptsetup`. Defaults to enabled.
+
+Various tools that read passwords from the TTY, such as `systemd-cryptenroll`
+and `homectl`:
+
+* `$PASSWORD` — takes a string: the literal password to use. If this
+  environment variable is set it is used as password instead of prompting the
+  user interactively. This exists primarily for debugging and testing
+  purposes. Do not use this for production code paths, since environment
+  variables are typically inherited down the process tree without restrictions
+  and should thus not be used for secrets.
+
+* `$NEWPASSWORD` — similar to `$PASSWORD` above, but is used when both a
+  current and a future password are required, for example if the password is to
+  be changed. In that case `$PASSWORD` shall carry the current (i.e. old)
+  password and `$NEWPASSWORD` the new.
+
+`systemd-homed`:
+
+* `$SYSTEMD_HOME_ROOT` – defines an absolute path where to look for home
+  directories/images. When unspecified defaults to `/home/`. This is useful for
+  debugging purposes in order to run a secondary `systemd-homed` instance that
+  operates on a different directory where home directories/images are placed.
+
+* `$SYSTEMD_HOME_RECORD_DIR` – defines an absolute path where to look for
+  fixated home records kept on the host. When unspecified defaults to
+  `/var/lib/systemd/home/`. Similar to `$SYSTEMD_HOME_ROOT` this is useful for
+  debugging purposes, in order to run a secondary `systemd-homed` instance that
+  operates on a record database entirely separate from the host's.
+
+* `$SYSTEMD_HOME_DEBUG_SUFFIX` – takes a short string that is suffixed to
+  `systemd-homed`'s D-Bus and Varlink service names/sockets. This is also
+  understood by `homectl`. This too is useful for running an additiona copy of
+  `systemd-homed` that doesn't interfere with the host's main one.
+
+* `$SYSTEMD_HOMEWORK_PATH` – configures the path to the `systemd-homework`
+  binary to invoke. If not specified defaults to
+  `/usr/lib/systemd/systemd-homework`.
+
+  Combining these four environment variables is pretty useful when
+  debugging/developing `systemd-homed`:
+```sh
+SYSTEMD_HOME_DEBUG_SUFFIX=foo \
+      SYSTEMD_HOMEWORK_PATH=/home/lennart/projects/systemd/build/systemd-homework \
+      SYSTEMD_HOME_ROOT=/home.foo/ \
+      SYSTEMD_HOME_RECORD_DIR=/var/lib/systemd/home.foo/ \
+      /home/lennart/projects/systemd/build/systemd-homed
+```

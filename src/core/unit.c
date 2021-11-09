@@ -770,7 +770,7 @@ Unit* unit_free(Unit *u) {
 
         hashmap_free(u->bpf_foreign_by_key);
 
-        bpf_program_unref(u->bpf_device_control_installed);
+        bpf_program_free(u->bpf_device_control_installed);
 
 #if BPF_FRAMEWORK
         bpf_link_free(u->restrict_ifaces_ingress_bpf_link);
@@ -1253,11 +1253,10 @@ int unit_add_exec_dependencies(Unit *u, ExecContext *c) {
                 if (!u->manager->prefix[dt])
                         continue;
 
-                char **dp;
-                STRV_FOREACH(dp, c->directories[dt].paths) {
+                for (size_t i = 0; i < c->directories[dt].n_items; i++) {
                         _cleanup_free_ char *p = NULL;
 
-                        p = path_join(u->manager->prefix[dt], *dp);
+                        p = path_join(u->manager->prefix[dt], c->directories[dt].items[i].path);
                         if (!p)
                                 return -ENOMEM;
 
@@ -1272,9 +1271,9 @@ int unit_add_exec_dependencies(Unit *u, ExecContext *c) {
 
         /* For the following three directory types we need write access, and /var/ is possibly on the root
          * fs. Hence order after systemd-remount-fs.service, to ensure things are writable. */
-        if (!strv_isempty(c->directories[EXEC_DIRECTORY_STATE].paths) ||
-            !strv_isempty(c->directories[EXEC_DIRECTORY_CACHE].paths) ||
-            !strv_isempty(c->directories[EXEC_DIRECTORY_LOGS].paths)) {
+        if (c->directories[EXEC_DIRECTORY_STATE].n_items > 0 ||
+            c->directories[EXEC_DIRECTORY_CACHE].n_items > 0 ||
+            c->directories[EXEC_DIRECTORY_LOGS].n_items > 0) {
                 r = unit_add_dependency_by_name(u, UNIT_AFTER, SPECIAL_REMOUNT_FS_SERVICE, true, UNIT_DEPENDENCY_FILE);
                 if (r < 0)
                         return r;
@@ -1852,15 +1851,9 @@ static bool unit_verify_deps(Unit *u) {
 int unit_start(Unit *u) {
         UnitActiveState state;
         Unit *following;
+        int r;
 
         assert(u);
-
-        /* Check start rate limiting early so that failure conditions don't cause us to enter a busy loop. */
-        if (UNIT_VTABLE(u)->test_start_limit) {
-                int r = UNIT_VTABLE(u)->test_start_limit(u);
-                if (r < 0)
-                        return r;
-        }
 
         /* If this is already started, then this will succeed. Note that this will even succeed if this unit
          * is not startable by the user. This is relied on to detect when we need to wait for units and when
@@ -1909,6 +1902,13 @@ int unit_start(Unit *u) {
         if (following) {
                 log_unit_debug(u, "Redirecting start request from %s to %s.", u->id, following->id);
                 return unit_start(following);
+        }
+
+        /* Check start rate limiting early so that failure conditions don't cause us to enter a busy loop. */
+        if (UNIT_VTABLE(u)->test_start_limit) {
+                r = UNIT_VTABLE(u)->test_start_limit(u);
+                if (r < 0)
+                        return r;
         }
 
         /* If it is stopped, but we cannot start it, then fail */
@@ -5863,6 +5863,16 @@ Condition *unit_find_failed_condition(Unit *u) {
                         return c;
 
         return failed_trigger && !has_succeeded_trigger ? failed_trigger : NULL;
+}
+
+bool unit_has_failed_condition_or_assert(Unit *u) {
+        if (dual_timestamp_is_set(&u->condition_timestamp) && !u->condition_result)
+                return true;
+
+        if (dual_timestamp_is_set(&u->assert_timestamp) && !u->assert_result)
+                return true;
+
+        return false;
 }
 
 static const char* const collect_mode_table[_COLLECT_MODE_MAX] = {

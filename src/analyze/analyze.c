@@ -26,6 +26,7 @@
 #include "copy.h"
 #include "def.h"
 #include "exit-status.h"
+#include "extract-word.h"
 #include "fd-util.h"
 #include "fileio.h"
 #include "filesystems.h"
@@ -42,6 +43,7 @@
 #include "parse-util.h"
 #include "path-util.h"
 #include "pretty-print.h"
+#include "rm-rf.h"
 #if HAVE_SECCOMP
 #  include "seccomp-util.h"
 #endif
@@ -53,6 +55,7 @@
 #include "strxcpyx.h"
 #include "terminal-util.h"
 #include "time-util.h"
+#include "tmpfile-util.h"
 #include "unit-name.h"
 #include "util.h"
 #include "verb-log-control.h"
@@ -228,6 +231,53 @@ static int bus_get_unit_property_strv(sd_bus *bus, const char *path, const char 
 
 static int compare_unit_start(const UnitTimes *a, const UnitTimes *b) {
         return CMP(a->activating, b->activating);
+}
+
+static int process_aliases(char *argv[], char *tempdir, char ***ret) {
+        _cleanup_strv_free_ char **filenames = NULL;
+        char **filename;
+        int r;
+
+        assert(argv);
+        assert(tempdir);
+        assert(ret);
+
+        STRV_FOREACH(filename, strv_skip(argv, 1)) {
+                _cleanup_free_ char *src = NULL, *dst = NULL, *arg = NULL;
+                char *parse_arg;
+
+                arg = strdup(*filename);
+                if (!arg)
+                        return -ENOMEM;
+
+                parse_arg = arg;
+                r = extract_first_word((const char **) &parse_arg, &src, ":", 0);
+                if (r < 0)
+                        return r;
+
+                if (!parse_arg) {
+                        r = strv_extend(&filenames, src);
+                        if (r < 0)
+                                return -ENOMEM;
+
+                        continue;
+                }
+
+                dst = path_join(tempdir, basename(parse_arg));
+                if (!dst)
+                        return -ENOMEM;
+
+                r = copy_file(src, dst, 0, 0644, 0, 0, COPY_REFLINK);
+                if (r < 0)
+                        return r;
+
+                r = strv_consume(&filenames, TAKE_PTR(dst));
+                if (r < 0)
+                        return -ENOMEM;
+        }
+
+        *ret = TAKE_PTR(filenames);
+        return 0;
 }
 
 static UnitTimes* unit_times_free_array(UnitTimes *t) {
@@ -639,7 +689,7 @@ static int analyze_plot(int argc, char *argv[], void *userdata) {
 
         r = acquire_bus(&bus, &use_full_bus);
         if (r < 0)
-                return bus_log_connect_error(r);
+                return bus_log_connect_error(r, arg_transport);
 
         n = acquire_boot_times(bus, &boot);
         if (n < 0)
@@ -1034,7 +1084,7 @@ static int analyze_critical_chain(int argc, char *argv[], void *userdata) {
 
         r = acquire_bus(&bus, NULL);
         if (r < 0)
-                return bus_log_connect_error(r);
+                return bus_log_connect_error(r, arg_transport);
 
         n = acquire_time_data(bus, &times);
         if (n <= 0)
@@ -1051,7 +1101,7 @@ static int analyze_critical_chain(int argc, char *argv[], void *userdata) {
         }
         unit_times_hashmap = h;
 
-        (void) pager_open(arg_pager_flags);
+        pager_open(arg_pager_flags);
 
         puts("The time when unit became active or started is printed after the \"@\" character.\n"
              "The time the unit took to start is printed after the \"+\" character.\n");
@@ -1076,7 +1126,7 @@ static int analyze_blame(int argc, char *argv[], void *userdata) {
 
         r = acquire_bus(&bus, NULL);
         if (r < 0)
-                return bus_log_connect_error(r);
+                return bus_log_connect_error(r, arg_transport);
 
         n = acquire_time_data(bus, &times);
         if (n <= 0)
@@ -1121,7 +1171,7 @@ static int analyze_blame(int argc, char *argv[], void *userdata) {
                         return table_log_add_error(r);
         }
 
-        (void) pager_open(arg_pager_flags);
+        pager_open(arg_pager_flags);
 
         return table_print(table, NULL);
 }
@@ -1133,7 +1183,7 @@ static int analyze_time(int argc, char *argv[], void *userdata) {
 
         r = acquire_bus(&bus, NULL);
         if (r < 0)
-                return bus_log_connect_error(r);
+                return bus_log_connect_error(r, arg_transport);
 
         r = pretty_boot_time(bus, &buf);
         if (r < 0)
@@ -1270,7 +1320,7 @@ static int dot(int argc, char *argv[], void *userdata) {
 
         r = acquire_bus(&bus, NULL);
         if (r < 0)
-                return bus_log_connect_error(r);
+                return bus_log_connect_error(r, arg_transport);
 
         r = expand_patterns(bus, strv_skip(argv, 1), &expanded_patterns);
         if (r < 0)
@@ -1347,9 +1397,9 @@ static int dump(int argc, char *argv[], void *userdata) {
 
         r = acquire_bus(&bus, NULL);
         if (r < 0)
-                return bus_log_connect_error(r);
+                return bus_log_connect_error(r, arg_transport);
 
-        (void) pager_open(arg_pager_flags);
+        pager_open(arg_pager_flags);
 
         if (!sd_bus_can_send(bus, SD_BUS_TYPE_UNIX_FD))
                 return dump_fallback(bus);
@@ -1376,7 +1426,7 @@ static int cat_config(int argc, char *argv[], void *userdata) {
         char **arg, **list;
         int r;
 
-        (void) pager_open(arg_pager_flags);
+        pager_open(arg_pager_flags);
 
         list = strv_skip(argv, 1);
         STRV_FOREACH(arg, list) {
@@ -1416,7 +1466,7 @@ static int verb_log_control(int argc, char *argv[], void *userdata) {
 
         r = acquire_bus(&bus, NULL);
         if (r < 0)
-                return bus_log_connect_error(r);
+                return bus_log_connect_error(r, arg_transport);
 
         return verb_log_control_common(bus, "org.freedesktop.systemd1", argv[0], argc == 2 ? argv[1] : NULL);
 }
@@ -1523,7 +1573,7 @@ static int dump_exit_status(int argc, char *argv[], void *userdata) {
                                 return table_log_add_error(r);
                 }
 
-        (void) pager_open(arg_pager_flags);
+        pager_open(arg_pager_flags);
 
         return table_print(table, NULL);
 }
@@ -1568,7 +1618,7 @@ static int dump_capabilities(int argc, char *argv[], void *userdata) {
                 (void) table_set_sort(table, (size_t) 1);
         }
 
-        (void) pager_open(arg_pager_flags);
+        pager_open(arg_pager_flags);
 
         return table_print(table, NULL);
 }
@@ -1652,7 +1702,7 @@ static void dump_syscall_filter(const SyscallFilterSet *set) {
 static int dump_syscall_filters(int argc, char *argv[], void *userdata) {
         bool first = true;
 
-        (void) pager_open(arg_pager_flags);
+        pager_open(arg_pager_flags);
 
         if (strv_isempty(strv_skip(argv, 1))) {
                 _cleanup_set_free_ Set *kernel = NULL, *known = NULL;
@@ -1824,7 +1874,7 @@ static int dump_filesystems(int argc, char *argv[], void *userdata) {
         return log_error_errno(SYNTHETIC_ERRNO(EOPNOTSUPP), "Not compiled with libbpf support, sorry.");
 #endif
 
-        (void) pager_open(arg_pager_flags);
+        pager_open(arg_pager_flags);
 
         if (strv_isempty(strv_skip(argv, 1))) {
                 _cleanup_set_free_ Set *kernel = NULL, *known = NULL;
@@ -2228,7 +2278,7 @@ static int service_watchdogs(int argc, char *argv[], void *userdata) {
 
         r = acquire_bus(&bus, NULL);
         if (r < 0)
-                return bus_log_connect_error(r);
+                return bus_log_connect_error(r, arg_transport);
 
         if (argc == 1) {
                 /* get ServiceWatchdogs */
@@ -2257,7 +2307,19 @@ static int do_condition(int argc, char *argv[], void *userdata) {
 }
 
 static int do_verify(int argc, char *argv[], void *userdata) {
-        return verify_units(strv_skip(argv, 1), arg_scope, arg_man, arg_generators, arg_recursive_errors, arg_root);
+        _cleanup_strv_free_ char **filenames = NULL;
+        _cleanup_(rm_rf_physical_and_freep) char *tempdir = NULL;
+        int r;
+
+        r = mkdtemp_malloc("/tmp/systemd-analyze-XXXXXX", &tempdir);
+        if (r < 0)
+                return log_error_errno(r, "Failed to setup working directory: %m");
+
+        r = process_aliases(argv, tempdir, &filenames);
+        if (r < 0)
+                return log_error_errno(r, "Couldn't process aliases: %m");
+
+        return verify_units(filenames, arg_scope, arg_man, arg_generators, arg_recursive_errors, arg_root);
 }
 
 static int do_security(int argc, char *argv[], void *userdata) {
@@ -2268,9 +2330,9 @@ static int do_security(int argc, char *argv[], void *userdata) {
 
         r = acquire_bus(&bus, NULL);
         if (r < 0)
-                return bus_log_connect_error(r);
+                return bus_log_connect_error(r, arg_transport);
 
-        (void) pager_open(arg_pager_flags);
+        pager_open(arg_pager_flags);
 
         if (arg_security_policy) {
                 r = json_parse_file(/*f=*/ NULL, arg_security_policy, /*flags=*/ 0, &policy, &line, &column);
@@ -2309,7 +2371,7 @@ static int help(int argc, char *argv[], void *userdata) {
         _cleanup_free_ char *link = NULL, *dot_link = NULL;
         int r;
 
-        (void) pager_open(arg_pager_flags);
+        pager_open(arg_pager_flags);
 
         r = terminal_urlify_man("systemd-analyze", "1", &link);
         if (r < 0)

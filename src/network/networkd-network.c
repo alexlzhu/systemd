@@ -33,6 +33,7 @@
 #include "networkd-sriov.h"
 #include "parse-util.h"
 #include "path-lookup.h"
+#include "radv-internal.h"
 #include "set.h"
 #include "socket-util.h"
 #include "stat-util.h"
@@ -76,16 +77,16 @@ static int network_resolve_netdev_one(Network *network, const char *name, NetDev
 
         if (netdev->kind != kind && !(kind == _NETDEV_KIND_TUNNEL &&
                                       IN_SET(netdev->kind,
-                                             NETDEV_KIND_IPIP,
-                                             NETDEV_KIND_SIT,
+                                             NETDEV_KIND_ERSPAN,
                                              NETDEV_KIND_GRE,
                                              NETDEV_KIND_GRETAP,
                                              NETDEV_KIND_IP6GRE,
                                              NETDEV_KIND_IP6GRETAP,
-                                             NETDEV_KIND_VTI,
-                                             NETDEV_KIND_VTI6,
                                              NETDEV_KIND_IP6TNL,
-                                             NETDEV_KIND_ERSPAN)))
+                                             NETDEV_KIND_IPIP,
+                                             NETDEV_KIND_SIT,
+                                             NETDEV_KIND_VTI,
+                                             NETDEV_KIND_VTI6)))
                 return log_warning_errno(SYNTHETIC_ERRNO(EINVAL),
                                          "%s: NetDev %s is not a %s, ignoring assignment",
                                          network->filename, name, kind_string);
@@ -400,17 +401,19 @@ int network_load_one(Manager *manager, OrderedHashmap **networks, const char *fi
                 .dhcp_broadcast = -1,
 
                 .dhcp6_use_address = true,
+                .dhcp6_use_pd_prefix = true,
                 .dhcp6_use_dns = true,
                 .dhcp6_use_hostname = true,
                 .dhcp6_use_ntp = true,
-                .dhcp6_rapid_commit = true,
                 .dhcp6_duid.type = _DUID_TYPE_INVALID,
+                .dhcp6_client_start_mode = _DHCP6_CLIENT_START_MODE_INVALID,
 
                 .dhcp6_pd = -1,
                 .dhcp6_pd_announce = true,
                 .dhcp6_pd_assign = true,
                 .dhcp6_pd_manage_temporary_address = true,
                 .dhcp6_pd_subnet_id = -1,
+                .dhcp6_pd_route_metric = DHCP6PD_ROUTE_METRIC,
 
                 .dhcp_server_bind_to_interface = true,
                 .dhcp_server_emit[SD_DHCP_LEASE_DNS].emit = true,
@@ -419,7 +422,8 @@ int network_load_one(Manager *manager, OrderedHashmap **networks, const char *fi
                 .dhcp_server_emit_router = true,
                 .dhcp_server_emit_timezone = true,
 
-                .router_lifetime_usec = 30 * USEC_PER_MINUTE,
+                .router_lifetime_usec = RADV_DEFAULT_ROUTER_LIFETIME_USEC,
+                .router_dns_lifetime_usec = RADV_DEFAULT_VALID_LIFETIME_USEC,
                 .router_emit_dns = true,
                 .router_emit_domains = true,
 
@@ -460,6 +464,8 @@ int network_load_one(Manager *manager, OrderedHashmap **networks, const char *fi
 
                 .ipv6_accept_ra = -1,
                 .ipv6_accept_ra_use_dns = true,
+                .ipv6_accept_ra_use_gateway = true,
+                .ipv6_accept_ra_use_route_prefix = true,
                 .ipv6_accept_ra_use_autonomous_prefix = true,
                 .ipv6_accept_ra_use_onlink_prefix = true,
                 .ipv6_accept_ra_use_mtu = true,
@@ -529,7 +535,7 @@ int network_load_one(Manager *manager, OrderedHashmap **networks, const char *fi
                         config_item_perf_lookup, network_network_gperf_lookup,
                         CONFIG_PARSE_WARN,
                         network,
-                        &network->timestamp);
+                        &network->stats_by_path);
         if (r < 0)
                 return r;
 
@@ -579,6 +585,28 @@ int network_load(Manager *manager, OrderedHashmap **networks) {
         return 0;
 }
 
+static bool stats_by_path_equal(Hashmap *a, Hashmap *b) {
+        struct stat *st_a, *st_b;
+        const char *path;
+
+        assert(a);
+        assert(b);
+
+        if (hashmap_size(a) != hashmap_size(b))
+                return false;
+
+        HASHMAP_FOREACH_KEY(st_a, path, a) {
+                st_b = hashmap_get(b, path);
+                if (!st_b)
+                        return false;
+
+                if (!stat_inode_unmodified(st_a, st_b))
+                        return false;
+        }
+
+        return true;
+}
+
 int network_reload(Manager *manager) {
         OrderedHashmap *new_networks = NULL;
         Network *n, *old;
@@ -592,14 +620,15 @@ int network_reload(Manager *manager) {
 
         ORDERED_HASHMAP_FOREACH(n, new_networks) {
                 r = network_get_by_name(manager, n->name, &old);
-                if (r < 0)
-                        continue; /* The .network file is new. */
-
-                if (n->timestamp != old->timestamp)
-                        continue; /* The .network file is modified. */
-
-                if (!streq(n->filename, old->filename))
+                if (r < 0) {
+                        log_debug("Found new .network file: %s", n->filename);
                         continue;
+                }
+
+                if (!stats_by_path_equal(n->stats_by_path, old->stats_by_path)) {
+                        log_debug("Found updated .network file: %s", n->filename);
+                        continue;
+                }
 
                 r = ordered_hashmap_replace(new_networks, old->name, old);
                 if (r < 0)
@@ -625,6 +654,7 @@ static Network *network_free(Network *network) {
                 return NULL;
 
         free(network->filename);
+        hashmap_free(network->stats_by_path);
 
         net_match_clear(&network->match);
         condition_free_list(network->conditions);
@@ -795,10 +825,16 @@ int config_parse_stacked_netdev(
         assert(rvalue);
         assert(data);
         assert(IN_SET(kind,
-                      NETDEV_KIND_VLAN, NETDEV_KIND_MACVLAN, NETDEV_KIND_MACVTAP,
-                      NETDEV_KIND_IPVLAN, NETDEV_KIND_IPVTAP, NETDEV_KIND_VXLAN,
-                      NETDEV_KIND_L2TP, NETDEV_KIND_MACSEC, _NETDEV_KIND_TUNNEL,
-                      NETDEV_KIND_XFRM));
+                      NETDEV_KIND_IPVLAN,
+                      NETDEV_KIND_IPVTAP,
+                      NETDEV_KIND_L2TP,
+                      NETDEV_KIND_MACSEC,
+                      NETDEV_KIND_MACVLAN,
+                      NETDEV_KIND_MACVTAP,
+                      NETDEV_KIND_VLAN,
+                      NETDEV_KIND_VXLAN,
+                      NETDEV_KIND_XFRM,
+                      _NETDEV_KIND_TUNNEL));
 
         if (!ifname_valid(rvalue)) {
                 log_syntax(unit, LOG_WARNING, filename, line, 0,
@@ -1240,73 +1276,6 @@ int config_parse_link_group(
         }
 
         network->group_set = true;
-        return 0;
-}
-
-
-int config_parse_uplink(
-                const char *unit,
-                const char *filename,
-                unsigned line,
-                const char *section,
-                unsigned section_line,
-                const char *lvalue,
-                int ltype,
-                const char *rvalue,
-                void *data,
-                void *userdata) {
-
-        Network *network = userdata;
-        int *index, r;
-        char **name;
-
-        assert(filename);
-        assert(section);
-        assert(lvalue);
-        assert(rvalue);
-
-        if (streq(section, "DHCPServer")) {
-                index = &network->dhcp_server_uplink_index;
-                name = &network->dhcp_server_uplink_name;
-        } else if (streq(section, "IPv6SendRA")) {
-                index = &network->router_uplink_index;
-                name = &network->router_uplink_name;
-        } else
-                assert_not_reached();
-
-        if (isempty(rvalue) || streq(rvalue, ":auto")) {
-                *index = UPLINK_INDEX_AUTO;
-                *name = mfree(*name);
-                return 0;
-        }
-
-        if (streq(rvalue, ":none")) {
-                *index = UPLINK_INDEX_NONE;
-                *name = mfree(*name);
-                return 0;
-        }
-
-        r = parse_ifindex(rvalue);
-        if (r > 0) {
-                *index = r;
-                *name = mfree(*name);
-                return 0;
-        }
-
-        if (!ifname_valid_full(rvalue, IFNAME_VALID_ALTERNATIVE)) {
-                log_syntax(unit, LOG_WARNING, filename, line, 0,
-                           "Invalid interface name in %s=, ignoring assignment: %s", lvalue, rvalue);
-                return 0;
-        }
-
-        /* The interface name will be resolved later. */
-        r = free_and_strdup_warn(name, rvalue);
-        if (r < 0)
-                return r;
-
-        /* Note, if uplink_name is set, then uplink_index will be ignored. So, the below does not mean
-         * an uplink interface will be selected automatically. */
-        *index = UPLINK_INDEX_AUTO;
         return 0;
 }
 

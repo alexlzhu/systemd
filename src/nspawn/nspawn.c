@@ -229,6 +229,7 @@ static ConsoleMode arg_console_mode = _CONSOLE_MODE_INVALID;
 static Credential *arg_credentials = NULL;
 static size_t arg_n_credentials = 0;
 static char **arg_bind_user = NULL;
+static bool arg_suppress_sync = false;
 
 STATIC_DESTRUCTOR_REGISTER(arg_directory, freep);
 STATIC_DESTRUCTOR_REGISTER(arg_template, freep);
@@ -303,7 +304,7 @@ static int help(void) {
         _cleanup_free_ char *link = NULL;
         int r;
 
-        (void) pager_open(arg_pager_flags);
+        pager_open(arg_pager_flags);
 
         r = terminal_urlify_man("systemd-nspawn", "1", &link);
         if (r < 0)
@@ -342,7 +343,9 @@ static int help(void) {
                "  -E --setenv=NAME[=VALUE]  Pass an environment variable to PID 1\n"
                "  -u --user=USER            Run the command under specified user or UID\n"
                "     --kill-signal=SIGNAL   Select signal to use for shutting down PID 1\n"
-               "     --notify-ready=BOOLEAN Receive notifications from the child init process\n\n"
+               "     --notify-ready=BOOLEAN Receive notifications from the child init process\n"
+               "     --suppress-sync=BOOLEAN\n"
+               "                            Suppress any form of disk data synchronization\n\n"
                "%3$sSystem Identity:%4$s\n"
                "  -M --machine=NAME         Set the machine name for the container\n"
                "     --hostname=NAME        Override the hostname for the container\n"
@@ -654,6 +657,12 @@ static int parse_environment(void) {
         if (e)
                 arg_container_service_name = e;
 
+        r = getenv_bool("SYSTEMD_SUPPRESS_SYNC");
+        if (r >= 0)
+                arg_suppress_sync = r;
+        else if (r != -ENXIO)
+                log_debug_errno(r, "Failed to parse $SYSTEMD_SUPPRESS_SYNC, ignoring: %m");
+
         return detect_unified_cgroup_hierarchy_from_environment();
 }
 
@@ -713,6 +722,7 @@ static int parse_argv(int argc, char *argv[]) {
                 ARG_SET_CREDENTIAL,
                 ARG_LOAD_CREDENTIAL,
                 ARG_BIND_USER,
+                ARG_SUPPRESS_SYNC,
         };
 
         static const struct option options[] = {
@@ -785,6 +795,7 @@ static int parse_argv(int argc, char *argv[]) {
                 { "set-credential",         required_argument, NULL, ARG_SET_CREDENTIAL         },
                 { "load-credential",        required_argument, NULL, ARG_LOAD_CREDENTIAL        },
                 { "bind-user",              required_argument, NULL, ARG_BIND_USER              },
+                { "suppress-sync",          required_argument, NULL, ARG_SUPPRESS_SYNC          },
                 {}
         };
 
@@ -1666,6 +1677,14 @@ static int parse_argv(int argc, char *argv[]) {
                                 return log_oom();
 
                         arg_settings_mask |= SETTING_BIND_USER;
+                        break;
+
+                case ARG_SUPPRESS_SYNC:
+                        r = parse_boolean_argument("--suppress-sync=", optarg, &arg_suppress_sync);
+                        if (r < 0)
+                                return r;
+
+                        arg_settings_mask |= SETTING_SUPPRESS_SYNC;
                         break;
 
                 case '?':
@@ -3295,6 +3314,7 @@ static int inner_child(
                         arg_custom_mounts,
                         arg_n_custom_mounts,
                         0,
+                        0,
                         arg_selinux_apifs_context,
                         MOUNT_NON_ROOT_ONLY | MOUNT_IN_USERNS);
         if (r < 0)
@@ -3383,6 +3403,16 @@ static int inner_child(
                 r = setup_seccomp(arg_caps_retain, arg_syscall_allow_list, arg_syscall_deny_list);
                 if (r < 0)
                         return r;
+        }
+
+        if (arg_suppress_sync) {
+#if HAVE_SECCOMP
+                r = seccomp_suppress_sync();
+                if (r < 0)
+                        log_debug_errno(r, "Failed to install sync() suppression seccomp filter, ignoring: %m");
+#else
+                log_debug("systemd is built without SECCOMP support. Ignoring --suppress-sync= command line option and SuppressSync= setting.");
+#endif
         }
 
 #if HAVE_SELINUX
@@ -3690,32 +3720,6 @@ static int outer_child(
                 directory = "/run/systemd/nspawn-root";
         }
 
-        if (arg_userns_mode != USER_NAMESPACE_NO &&
-            IN_SET(arg_userns_ownership, USER_NAMESPACE_OWNERSHIP_MAP, USER_NAMESPACE_OWNERSHIP_AUTO) &&
-            arg_uid_shift != 0) {
-                r = make_mount_point(directory);
-                if (r < 0)
-                        return r;
-
-                r = remount_idmap(directory, arg_uid_shift, arg_uid_range);
-                if (r == -EINVAL || ERRNO_IS_NOT_SUPPORTED(r)) {
-                        /* This might fail because the kernel or file system doesn't support idmapping. We
-                         * can't really distinguish this nicely, nor do we have any guarantees about the
-                         * error codes we see, could be EOPNOTSUPP or EINVAL. */
-                        if (arg_userns_ownership != USER_NAMESPACE_OWNERSHIP_AUTO)
-                                return log_error_errno(SYNTHETIC_ERRNO(EOPNOTSUPP),
-                                                       "ID mapped mounts are apparently not available, sorry.");
-
-                        log_debug("ID mapped mounts are apparently not available on this kernel or for the selected file system, reverting to recursive chown()ing.");
-                        arg_userns_ownership = USER_NAMESPACE_OWNERSHIP_CHOWN;
-                } else if (r < 0)
-                        return log_error_errno(r, "Failed to set up ID mapped mounts: %m");
-                else {
-                        log_debug("ID mapped mounts available, making use of them.");
-                        idmap = true;
-                }
-        }
-
         r = setup_pivot_root(
                         directory,
                         arg_pivot_root_new,
@@ -3766,6 +3770,7 @@ static int outer_child(
                         arg_custom_mounts,
                         arg_n_custom_mounts,
                         arg_uid_shift,
+                        arg_uid_range,
                         arg_selinux_apifs_context,
                         MOUNT_ROOT_ONLY);
         if (r < 0)
@@ -3775,6 +3780,29 @@ static int outer_child(
         r = make_mount_point(directory);
         if (r < 0)
                 return r;
+
+        if (arg_userns_mode != USER_NAMESPACE_NO &&
+            IN_SET(arg_userns_ownership, USER_NAMESPACE_OWNERSHIP_MAP, USER_NAMESPACE_OWNERSHIP_AUTO) &&
+            arg_uid_shift != 0) {
+
+                r = remount_idmap(directory, arg_uid_shift, arg_uid_range);
+                if (r == -EINVAL || ERRNO_IS_NOT_SUPPORTED(r)) {
+                        /* This might fail because the kernel or file system doesn't support idmapping. We
+                         * can't really distinguish this nicely, nor do we have any guarantees about the
+                         * error codes we see, could be EOPNOTSUPP or EINVAL. */
+                        if (arg_userns_ownership != USER_NAMESPACE_OWNERSHIP_AUTO)
+                                return log_error_errno(SYNTHETIC_ERRNO(EOPNOTSUPP),
+                                                       "ID mapped mounts are apparently not available, sorry.");
+
+                        log_debug("ID mapped mounts are apparently not available on this kernel or for the selected file system, reverting to recursive chown()ing.");
+                        arg_userns_ownership = USER_NAMESPACE_OWNERSHIP_CHOWN;
+                } else if (r < 0)
+                        return log_error_errno(r, "Failed to set up ID mapped mounts: %m");
+                else {
+                        log_debug("ID mapped mounts available, making use of them.");
+                        idmap = true;
+                }
+        }
 
         if (dissected_image) {
                 /* Now we know the uid shift, let's now mount everything else that might be in the image. */
@@ -3886,6 +3914,7 @@ static int outer_child(
                         arg_custom_mounts,
                         arg_n_custom_mounts,
                         arg_uid_shift,
+                        arg_uid_range,
                         arg_selinux_apifs_context,
                         MOUNT_NON_ROOT_ONLY);
         if (r < 0)
@@ -4176,6 +4205,7 @@ static int nspawn_dispatch_notify_fd(sd_event_source *source, int fd, uint32_t r
         ssize_t n;
         pid_t inner_child_pid;
         _cleanup_strv_free_ char **tags = NULL;
+        int r;
 
         assert(userdata);
 
@@ -4214,8 +4244,11 @@ static int nspawn_dispatch_notify_fd(sd_event_source *source, int fd, uint32_t r
         if (!tags)
                 return log_oom();
 
-        if (strv_find(tags, "READY=1"))
-                (void) sd_notifyf(false, "READY=1\n");
+        if (strv_find(tags, "READY=1")) {
+                r = sd_notify(false, "READY=1\n");
+                if (r < 0)
+                        log_warning_errno(r, "Failed to send readiness notification, ignoring: %m");
+        }
 
         p = strv_find_startswith(tags, "STATUS=");
         if (p)
@@ -4551,6 +4584,9 @@ static int merge_settings(Settings *settings, const char *path) {
                 else
                         arg_console_mode = settings->console_mode;
         }
+
+        if ((arg_settings_mask & SETTING_SUPPRESS_SYNC) == 0)
+                arg_suppress_sync = settings->suppress_sync;
 
         /* The following properties can only be set through the OCI settings logic, not from the command line, hence we
          * don't consult arg_settings_mask for them. */
@@ -5102,8 +5138,11 @@ static int run_container(
         (void) sd_notifyf(false,
                           "STATUS=Container running.\n"
                           "X_NSPAWN_LEADER_PID=" PID_FMT, *pid);
-        if (!arg_notify_ready)
-                (void) sd_notify(false, "READY=1\n");
+        if (!arg_notify_ready) {
+                r = sd_notify(false, "READY=1\n");
+                if (r < 0)
+                        log_warning_errno(r, "Failed to send readiness notification, ignoring: %m");
+        }
 
         if (arg_kill_signal > 0) {
                 /* Try to kill the init system on SIGINT or SIGTERM */
@@ -5216,8 +5255,7 @@ static int run_container(
                 }
         }
 
-        r = wait_for_container(*pid, &container_status);
-        *pid = 0;
+        r = wait_for_container(TAKE_PID(*pid), &container_status);
 
         /* Tell machined that we are gone. */
         if (bus)
@@ -5302,6 +5340,15 @@ static int initialize_rlimits(void) {
                                 if (prlimit(1, rl, NULL, &buffer) < 0)
                                         return log_error_errno(errno, "Failed to read resource limit RLIMIT_%s of PID 1: %m", rlimit_to_string(rl));
 
+                                v = &buffer;
+                        } else if (rl == RLIMIT_NOFILE) {
+                                /* We nowadays bump RLIMIT_NOFILE's hard limit early in PID 1 for all
+                                 * userspace. Given that nspawn containers are often run without our PID 1,
+                                 * let's grant the containers a raised RLIMIT_NOFILE hard limit by default,
+                                 * so that container userspace gets similar resources as host userspace
+                                 * gets. */
+                                buffer = kernel_defaults[rl];
+                                buffer.rlim_max = MIN((rlim_t) read_nr_open(), (rlim_t) HIGH_RLIMIT_NOFILE);
                                 v = &buffer;
                         } else
                                 v = kernel_defaults + rl;

@@ -67,8 +67,8 @@ int address_new(Address **ret) {
         *address = (Address) {
                 .family = AF_UNSPEC,
                 .scope = RT_SCOPE_UNIVERSE,
-                .cinfo.ifa_prefered = CACHE_INFO_INFINITY_LIFE_TIME,
-                .cinfo.ifa_valid = CACHE_INFO_INFINITY_LIFE_TIME,
+                .lifetime_valid_usec = USEC_INFINITY,
+                .lifetime_preferred_usec = USEC_INFINITY,
                 .set_broadcast = -1,
                 .duplicate_address_detection = ADDRESS_FAMILY_IPV6,
         };
@@ -222,6 +222,41 @@ static bool address_may_set_broadcast(const Address *a, const Link *link) {
 
         /* Typical configuration for wireguard does not set broadcast. */
         return !streq_ptr(link->kind, "wireguard");
+}
+
+static struct ifa_cacheinfo *address_set_cinfo(const Address *a, struct ifa_cacheinfo *cinfo) {
+        usec_t now_usec;
+
+        assert(a);
+        assert(cinfo);
+
+        now_usec = now(clock_boottime_or_monotonic());
+
+        *cinfo = (struct ifa_cacheinfo) {
+                .ifa_valid = MIN(usec_sub_unsigned(a->lifetime_valid_usec, now_usec) / USEC_PER_SEC, UINT32_MAX),
+                .ifa_prefered = MIN(usec_sub_unsigned(a->lifetime_preferred_usec, now_usec) / USEC_PER_SEC, UINT32_MAX),
+        };
+
+        return cinfo;
+}
+
+static void address_set_lifetime(Address *a, const struct ifa_cacheinfo *cinfo) {
+        usec_t now_usec;
+
+        assert(a);
+        assert(cinfo);
+
+        now_usec = now(clock_boottime_or_monotonic());
+
+        if (cinfo->ifa_valid == UINT32_MAX)
+                a->lifetime_valid_usec = USEC_INFINITY;
+        else
+                a->lifetime_valid_usec = usec_add(cinfo->ifa_valid * USEC_PER_SEC, now_usec);
+
+        if (cinfo->ifa_prefered == UINT32_MAX)
+                a->lifetime_preferred_usec = USEC_INFINITY;
+        else
+                a->lifetime_preferred_usec = usec_add(cinfo->ifa_prefered * USEC_PER_SEC, now_usec);
 }
 
 static uint32_t address_prefix(const Address *a) {
@@ -553,16 +588,16 @@ int manager_has_address(Manager *manager, int family, const union in_addr_union 
         return false;
 }
 
-const char* format_lifetime(char *buf, size_t l, uint32_t lifetime) {
+const char* format_lifetime(char *buf, size_t l, usec_t lifetime_usec) {
         assert(buf);
         assert(l > 4);
 
-        if (lifetime == CACHE_INFO_INFINITY_LIFE_TIME)
+        if (lifetime_usec == USEC_INFINITY)
                 return "forever";
 
         sprintf(buf, "for ");
         /* format_timespan() never fails */
-        assert_se(format_timespan(buf + 4, l - 4, lifetime * USEC_PER_SEC, USEC_PER_SEC));
+        assert_se(format_timespan(buf + 4, l - 4, usec_sub_unsigned(lifetime_usec, now(clock_boottime_or_monotonic())), USEC_PER_SEC));
         return buf;
 }
 
@@ -586,8 +621,8 @@ static void log_address_debug(const Address *address, const char *str, const Lin
         log_link_debug(link, "%s %s address (%s): %s%s%s/%u (valid %s, preferred %s), flags: %s",
                        str, strna(network_config_source_to_string(address->source)), strna(state),
                        strnull(addr), peer ? " peer " : "", strempty(peer), address->prefixlen,
-                       FORMAT_LIFETIME(address->cinfo.ifa_valid),
-                       FORMAT_LIFETIME(address->cinfo.ifa_prefered),
+                       FORMAT_LIFETIME(address->lifetime_valid_usec),
+                       FORMAT_LIFETIME(address->lifetime_preferred_usec),
                        strna(flags_str));
 }
 
@@ -684,7 +719,7 @@ bool link_address_is_dynamic(const Link *link, const Address *address) {
         assert(link);
         assert(address);
 
-        if (address->cinfo.ifa_prefered != CACHE_INFO_INFINITY_LIFE_TIME)
+        if (address->lifetime_preferred_usec != USEC_INFINITY)
                 return true;
 
         /* Even when the address is leased from a DHCP server, networkd assign the address
@@ -875,6 +910,15 @@ int link_drop_addresses(Link *link) {
         return r;
 }
 
+void link_foreignize_addresses(Link *link) {
+        Address *address;
+
+        assert(link);
+
+        SET_FOREACH(address, link->addresses)
+                address->source = NETWORK_CONFIG_SOURCE_FOREIGN;
+}
+
 static int address_acquire(Link *link, const Address *original, Address **ret) {
         _cleanup_(address_freep) Address *na = NULL;
         union in_addr_union in_addr;
@@ -983,7 +1027,8 @@ static int address_configure(
                         return log_link_error_errno(link, r, "Could not append IFA_LABEL attribute: %m");
         }
 
-        r = sd_netlink_message_append_cache_info(req, IFA_CACHEINFO, &address->cinfo);
+        r = sd_netlink_message_append_cache_info(req, IFA_CACHEINFO,
+                                                 address_set_cinfo(address, &(struct ifa_cacheinfo) {}));
         if (r < 0)
                 return log_link_error_errno(link, r, "Could not append IFA_CACHEINFO attribute: %m");
 
@@ -1068,9 +1113,13 @@ int link_request_address(
         if (address_get(link, address, &existing) < 0) {
                 _cleanup_(address_freep) Address *tmp = NULL;
 
-                r = address_dup(address, &tmp);
-                if (r < 0)
-                        return r;
+                if (consume_object)
+                        tmp = address;
+                else {
+                        r = address_dup(address, &tmp);
+                        if (r < 0)
+                                return r;
+                }
 
                 /* Consider address tentative until we get the real flags from the kernel */
                 tmp->flags |= IFA_F_TENTATIVE;
@@ -1083,14 +1132,18 @@ int link_request_address(
         } else {
                 existing->source = address->source;
                 existing->provider = address->provider;
+                existing->lifetime_valid_usec = address->lifetime_valid_usec;
+                existing->lifetime_preferred_usec = address->lifetime_preferred_usec;
+                if (consume_object)
+                        address_free(address);
         }
 
         r = ipv4acd_configure(existing);
         if (r < 0)
                 return r;
 
-        log_address_debug(address, "Requesting", link);
-        r = link_queue_request(link, REQUEST_TYPE_ADDRESS, address, consume_object,
+        log_address_debug(existing, "Requesting", link);
+        r = link_queue_request(link, REQUEST_TYPE_ADDRESS, existing, false,
                                message_counter, netlink_handler, ret);
         if (r < 0)
                 return log_link_warning_errno(link, r, "Failed to request address: %m");
@@ -1192,6 +1245,7 @@ int request_process_address(Request *req) {
 
 int manager_rtnl_process_address(sd_netlink *rtnl, sd_netlink_message *message, Manager *m) {
         _cleanup_(address_freep) Address *tmp = NULL;
+        struct ifa_cacheinfo cinfo;
         Link *link = NULL;
         uint16_t type;
         Address *address = NULL;
@@ -1326,7 +1380,7 @@ int manager_rtnl_process_address(sd_netlink *rtnl, sd_netlink_message *message, 
                 assert_not_reached();
         }
 
-        r = sd_netlink_message_read_cache_info(message, IFA_CACHEINFO, &tmp->cinfo);
+        r = sd_netlink_message_read_cache_info(message, IFA_CACHEINFO, &cinfo);
         if (r < 0 && r != -ENODATA) {
                 log_link_warning_errno(link, r, "rtnl: cannot get IFA_CACHEINFO attribute, ignoring: %m");
                 return 0;
@@ -1340,10 +1394,11 @@ int manager_rtnl_process_address(sd_netlink *rtnl, sd_netlink_message *message, 
                         /* update flags and etc. */
                         address->flags = tmp->flags;
                         address->scope = tmp->scope;
-                        address->cinfo = tmp->cinfo;
+                        address_set_lifetime(address, &cinfo);
                         address_enter_configured(address);
                         log_address_debug(address, "Received updated", link);
                 } else {
+                        address_set_lifetime(tmp, &cinfo);
                         address_enter_configured(tmp);
                         log_address_debug(tmp, "Received new", link);
 
@@ -1602,7 +1657,7 @@ int config_parse_lifetime(
 
         Network *network = userdata;
         _cleanup_(address_free_or_set_invalidp) Address *n = NULL;
-        uint32_t k;
+        usec_t k;
         int r;
 
         assert(filename);
@@ -1622,7 +1677,7 @@ int config_parse_lifetime(
 
         /* We accept only "forever", "infinity", empty, or "0". */
         if (STR_IN_SET(rvalue, "forever", "infinity", ""))
-                k = CACHE_INFO_INFINITY_LIFE_TIME;
+                k = USEC_INFINITY;
         else if (streq(rvalue, "0"))
                 k = 0;
         else {
@@ -1631,7 +1686,7 @@ int config_parse_lifetime(
                 return 0;
         }
 
-        n->cinfo.ifa_prefered = k;
+        n->lifetime_preferred_usec = k;
         TAKE_PTR(n);
 
         return 0;

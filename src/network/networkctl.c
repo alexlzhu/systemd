@@ -42,6 +42,7 @@
 #include "macro.h"
 #include "macvlan-util.h"
 #include "main-func.h"
+#include "netif-util.h"
 #include "netlink-util.h"
 #include "network-internal.h"
 #include "network-util.h"
@@ -553,7 +554,7 @@ static int decode_link(sd_netlink_message *m, LinkInfo *info, char **patterns, b
 
         info->has_mac_address =
                 netlink_message_read_hw_addr(m, IFLA_ADDRESS, &info->hw_address) >= 0 &&
-                !hw_addr_is_null(&info->hw_address);
+                info->hw_address.length > 0;
 
         info->has_permanent_mac_address =
                 ethtool_get_permanent_macaddr(NULL, info->name, &info->permanent_mac_address) >= 0 &&
@@ -810,7 +811,7 @@ static int list_links(int argc, char *argv[], void *userdata) {
         if (c < 0)
                 return c;
 
-        (void) pager_open(arg_pager_flags);
+        pager_open(arg_pager_flags);
 
         table = table_new("idx", "link", "type", "operational", "setup");
         if (!table)
@@ -845,7 +846,7 @@ static int list_links(int argc, char *argv[], void *userdata) {
                         setup_state = strdup("unmanaged");
                 setup_state_to_color(setup_state, &on_color_setup, NULL);
 
-                r = link_get_type_string(links[i].sd_device, links[i].iftype, &t);
+                r = net_get_type_string(links[i].sd_device, links[i].iftype, &t);
                 if (r == -ENOMEM)
                         return log_oom();
 
@@ -1568,7 +1569,7 @@ static int link_status_one(
                         (void) sd_device_get_property_value(info->sd_device, "ID_MODEL", &model);
         }
 
-        r = link_get_type_string(info->sd_device, info->iftype, &t);
+        r = net_get_type_string(info->sd_device, info->iftype, &t);
         if (r == -ENOMEM)
                 return log_oom();
 
@@ -2394,7 +2395,7 @@ static int link_status(int argc, char *argv[], void *userdata) {
                         return dump_link_description(strv_skip(argv, 1));
         }
 
-        (void) pager_open(arg_pager_flags);
+        pager_open(arg_pager_flags);
 
         r = sd_bus_open_system(&bus);
         if (r < 0)
@@ -2493,7 +2494,7 @@ static int link_lldp_status(int argc, char *argv[], void *userdata) {
         if (c < 0)
                 return c;
 
-        (void) pager_open(arg_pager_flags);
+        pager_open(arg_pager_flags);
 
         table = table_new("link",
                           "chassis id",
@@ -2872,7 +2873,7 @@ static int help(void) {
                "     --no-pager          Do not pipe output into a pager\n"
                "     --no-legend         Do not show the headers and footers\n"
                "  -a --all               Show status for all links\n"
-               "  -s --stats             Show detailed link statics\n"
+               "  -s --stats             Show detailed link statistics\n"
                "  -l --full              Do not ellipsize output\n"
                "  -n --lines=INTEGER     Number of journal entries to show\n"
                "     --json=pretty|short|off\n"

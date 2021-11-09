@@ -83,9 +83,9 @@ static int spawn_child(const char* child, char** argv) {
 
         /* In the child */
         if (r == 0) {
-                safe_close(fd[0]);
+                fd[0] = safe_close(fd[0]);
 
-                r = rearrange_stdio(STDIN_FILENO, fd[1], STDERR_FILENO);
+                r = rearrange_stdio(STDIN_FILENO, TAKE_FD(fd[1]), STDERR_FILENO);
                 if (r < 0) {
                         log_error_errno(r, "Failed to dup pipe to stdout: %m");
                         _exit(EXIT_FAILURE);
@@ -662,7 +662,7 @@ static int create_remoteserver(
                         else
                                 url = strjoina(arg_url, "/entries");
                 } else
-                        url = strdupa(arg_url);
+                        url = strdupa_safe(arg_url);
 
                 log_info("Spawning curl %s...", url);
                 fd = spawn_curl(url);
@@ -673,7 +673,7 @@ static int create_remoteserver(
                 if (!hostname)
                         hostname = arg_url;
 
-                hostname = strndupa(hostname, strcspn(hostname, "/:"));
+                hostname = strndupa_safe(hostname, strcspn(hostname, "/:"));
 
                 r = journal_remote_add_source(s, fd, (char *) hostname, false);
                 if (r < 0)

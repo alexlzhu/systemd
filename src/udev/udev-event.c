@@ -30,6 +30,7 @@
 #include "strxcpyx.h"
 #include "udev-builtin.h"
 #include "udev-event.h"
+#include "udev-netlink.h"
 #include "udev-node.h"
 #include "udev-util.h"
 #include "udev-watch.h"
@@ -222,7 +223,7 @@ static int safe_atou_optional_plus(const char *s, unsigned *ret) {
 
         p = endswith(s, "+");
         if (p)
-                s = strndupa(s, p - s);
+                s = strndupa_safe(s, p - s);
 
         r = safe_atou(s, ret);
         if (r < 0)
@@ -351,11 +352,11 @@ static ssize_t udev_event_subst_format(
 
                 /* try to read the attribute the device */
                 if (!val)
-                        (void) sd_device_get_sysattr_value(dev, attr, &val);
+                        (void) device_get_sysattr_value_maybe_from_netlink(dev, &event->rtnl, attr, &val);
 
                 /* try to read the attribute of the parent device, other matches have selected */
                 if (!val && event->dev_parent && event->dev_parent != dev)
-                        (void) sd_device_get_sysattr_value(event->dev_parent, attr, &val);
+                        (void) device_get_sysattr_value_maybe_from_netlink(event->dev_parent, &event->rtnl, attr, &val);
 
                 if (!val)
                         goto null_terminate;
@@ -782,7 +783,7 @@ int udev_event_spawn(UdevEvent *event,
                 return log_device_error_errno(event->dev, r,
                                               "Failed to fork() to execute command '%s': %m", cmd);
         if (r == 0) {
-                if (rearrange_stdio(-1, outpipe[WRITE_END], errpipe[WRITE_END]) < 0)
+                if (rearrange_stdio(-1, TAKE_FD(outpipe[WRITE_END]), TAKE_FD(errpipe[WRITE_END])) < 0)
                         _exit(EXIT_FAILURE);
 
                 (void) close_all_fds(NULL, 0);
@@ -826,6 +827,7 @@ int udev_event_spawn(UdevEvent *event,
 static int rename_netif(UdevEvent *event) {
         sd_device *dev = event->dev;
         const char *oldname;
+        unsigned flags;
         int ifindex, r;
 
         if (!event->name)
@@ -850,6 +852,16 @@ static int rename_netif(UdevEvent *event) {
         if (naming_scheme_has(NAMING_REPLACE_STRICTLY) &&
             !ifname_valid(event->name)) {
                 log_device_warning(dev, "Invalid network interface name, ignoring: %s", event->name);
+                return 0;
+        }
+
+        r = rtnl_get_link_info(&event->rtnl, ifindex, NULL, &flags);
+        if (r < 0)
+                return log_device_warning_errno(dev, r, "Failed to get link flags: %m");
+
+        if (FLAGS_SET(flags, IFF_UP)) {
+                log_device_info(dev, "Network interface '%s' is already up, refusing to rename to '%s'.",
+                                oldname, event->name);
                 return 0;
         }
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-
+# SPDX-License-Identifier: LGPL-2.1-or-later
 set -ex
 
 test_rule="/run/udev/rules.d/49-test.rules"
@@ -28,7 +28,7 @@ teardown() {
 run_test() {
     since="$(date +%T)"
 
-    udevadm trigger -w --action add /dev/null
+    SYSTEMD_LOG_LEVEL=debug udevadm trigger --verbose --settle --action add /dev/null
 
     for _ in {1..20}; do
         if coredumpctl --since "$since" --no-legend --no-pager | grep /bin/udevadm ; then

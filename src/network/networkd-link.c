@@ -486,8 +486,11 @@ void link_check_ready(Link *link) {
                 if (!address_exists(a))
                         continue;
                 if (IN_SET(a->source,
-                           NETWORK_CONFIG_SOURCE_IPV4LL, NETWORK_CONFIG_SOURCE_DHCP4,
-                           NETWORK_CONFIG_SOURCE_DHCP6, NETWORK_CONFIG_SOURCE_NDISC)) {
+                           NETWORK_CONFIG_SOURCE_IPV4LL,
+                           NETWORK_CONFIG_SOURCE_DHCP4,
+                           NETWORK_CONFIG_SOURCE_DHCP6,
+                           NETWORK_CONFIG_SOURCE_DHCP6PD,
+                           NETWORK_CONFIG_SOURCE_NDISC)) {
                         has_dynamic_address = true;
                         break;
                 }
@@ -496,7 +499,7 @@ void link_check_ready(Link *link) {
         if ((link_ipv4ll_enabled(link) || link_dhcp4_enabled(link) || link_dhcp6_with_address_enabled(link) ||
              (link_dhcp6_pd_is_enabled(link) && link->network->dhcp6_pd_assign)) && !has_dynamic_address)
                 /* When DHCP[46] or IPv4LL is enabled, at least one address is acquired by them. */
-                return (void) log_link_debug(link, "%s(): DHCPv4, DHCPv6 or IPv4LL is enabled but no dynamic address is assigned yet.", __func__);
+                return (void) log_link_debug(link, "%s(): DHCPv4, DHCPv6, DHCPv6PD or IPv4LL is enabled but no dynamic address is assigned yet.", __func__);
 
         /* Ignore NDisc when ConfigureWithoutCarrier= is enabled, as IPv6AcceptRA= is enabled by default. */
         if (link_ipv4ll_enabled(link) || link_dhcp4_enabled(link) ||
@@ -594,16 +597,9 @@ static int link_acquire_dynamic_ipv6_conf(Link *link) {
 
         assert(link);
 
-        if (link->radv) {
-                assert(link->radv);
-                assert(in6_addr_is_link_local(&link->ipv6ll_address));
-
-                log_link_debug(link, "Starting IPv6 Router Advertisements");
-
-                r = sd_radv_start(link->radv);
-                if (r < 0)
-                        return log_link_warning_errno(link, r, "Could not start IPv6 Router Advertisement: %m");
-        }
+        r = radv_start(link);
+        if (r < 0)
+                return log_link_warning_errno(link, r, "Failed to start IPv6 Router Advertisement engine: %m");
 
         r = ndisc_start(link);
         if (r < 0)
@@ -612,10 +608,6 @@ static int link_acquire_dynamic_ipv6_conf(Link *link) {
         r = dhcp6_start(link);
         if (r < 0)
                 return log_link_warning_errno(link, r, "Failed to start DHCPv6 client: %m");
-
-        r = dhcp6_request_prefix_delegation(link);
-        if (r < 0)
-                return log_link_warning_errno(link, r, "Failed to request DHCPv6 prefix delegation: %m");
 
         return 0;
 }
@@ -659,6 +651,7 @@ static int link_acquire_dynamic_conf(Link *link) {
         int r;
 
         assert(link);
+        assert(link->network);
 
         r = link_acquire_dynamic_ipv4_conf(link);
         if (r < 0)
@@ -668,6 +661,16 @@ static int link_acquire_dynamic_conf(Link *link) {
                 r = link_acquire_dynamic_ipv6_conf(link);
                 if (r < 0)
                         return r;
+        }
+
+        if (!link_radv_enabled(link) || !link->network->dhcp6_pd_announce) {
+                /* DHCPv6PD downstream does not require IPv6LL address. But may require RADV to be
+                 * configured, and RADV may not be configured yet here. Only acquire subnet prefix when
+                 * RADV is disabled, or the announcement of the prefix is disabled. Otherwise, the
+                 * below will be called in radv_start(). */
+                r = dhcp6_request_prefix_delegation(link);
+                if (r < 0)
+                        return log_link_warning_errno(link, r, "Failed to request DHCPv6 prefix delegation: %m");
         }
 
         if (link->lldp_tx) {
@@ -1039,13 +1042,24 @@ static int link_drop_config(Link *link) {
         if (k < 0 && r >= 0)
                 r = k;
 
-        k = manager_drop_routing_policy_rules(link->manager, link);
+        k = link_drop_routing_policy_rules(link);
         if (k < 0 && r >= 0)
                 r = k;
 
         ndisc_flush(link);
 
         return r;
+}
+
+static void link_foreignize_config(Link *link) {
+        assert(link);
+        assert(link->manager);
+
+        link_foreignize_routes(link);
+        link_foreignize_nexthops(link);
+        link_foreignize_addresses(link);
+        link_foreignize_neighbors(link);
+        link_foreignize_routing_policy_rules(link);
 }
 
 static int link_configure(Link *link) {
@@ -1246,9 +1260,16 @@ static int link_reconfigure_impl(Link *link, bool force) {
 
         link_drop_requests(link);
 
-        r = link_drop_config(link);
-        if (r < 0)
-                return r;
+        if (network && !force)
+                /* When a new/updated .network file is assigned, first make all configs (addresses,
+                 * routes, and so on) foreign, and then drop unnecessary configs later by
+                 * link_drop_foreign_config() in link_configure(). */
+                link_foreignize_config(link);
+        else {
+                r = link_drop_config(link);
+                if (r < 0)
+                        return r;
+        }
 
         link_free_carrier_maps(link);
         link_free_engines(link);
@@ -2015,7 +2036,7 @@ static int link_update_hardware_address(Link *link, sd_netlink_message *message)
         if (hw_addr_equal(&link->hw_addr, &addr))
                 return 0;
 
-        if (hw_addr_is_null(&link->hw_addr))
+        if (link->hw_addr.length == 0)
                 log_link_debug(link, "Saved hardware address: %s", HW_ADDR_TO_STR(&addr));
         else {
                 log_link_debug(link, "Hardware address is changed: %s → %s",

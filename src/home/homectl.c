@@ -14,6 +14,7 @@
 #include "fd-util.h"
 #include "fileio.h"
 #include "format-table.h"
+#include "fs-util.h"
 #include "glyph-util.h"
 #include "home-util.h"
 #include "homectl-fido2.h"
@@ -103,7 +104,7 @@ static int acquire_bus(sd_bus **bus) {
 
         r = bus_connect_transport(arg_transport, arg_host, false, bus);
         if (r < 0)
-                return bus_log_connect_error(r);
+                return bus_log_connect_error(r, arg_transport);
 
         (void) sd_bus_set_allow_interactive_authorization(*bus, arg_ask_password);
 
@@ -612,7 +613,7 @@ static int inspect_home(int argc, char *argv[], void *userdata) {
         int r, ret = 0;
         char **items, **i;
 
-        (void) pager_open(arg_pager_flags);
+        pager_open(arg_pager_flags);
 
         r = acquire_bus(&bus);
         if (r < 0)
@@ -2019,7 +2020,7 @@ static int help(int argc, char *argv[], void *userdata) {
         _cleanup_free_ char *link = NULL;
         int r;
 
-        (void) pager_open(arg_pager_flags);
+        pager_open(arg_pager_flags);
 
         r = terminal_urlify_man("homectl", "1", &link);
         if (r < 0)
@@ -2131,6 +2132,7 @@ static int help(int argc, char *argv[], void *userdata) {
                "     --storage=STORAGE         Storage type to use (luks, fscrypt, directory,\n"
                "                               subvolume, cifs)\n"
                "     --image-path=PATH         Path to image file/directory\n"
+               "     --drop-caches=BOOL        Whether to automatically drop caches on logout\n"
                "\n%4$sLUKS Storage User Record Properties:%5$s\n"
                "     --fs-type=TYPE            File system type to use in case of luks\n"
                "                               storage (btrfs, ext4, xfs)\n"
@@ -2159,6 +2161,8 @@ static int help(int argc, char *argv[], void *userdata) {
                "     --cifs-domain=DOMAIN      CIFS (Windows) domain\n"
                "     --cifs-user-name=USER     CIFS (Windows) user name\n"
                "     --cifs-service=SERVICE    CIFS (Windows) service to mount as home area\n"
+               "     --cifs-extra-mount-options=OPTIONS\n"
+               "                               CIFS (Windows) extra mount options\n"
                "\n%4$sLogin Behaviour User Record Properties:%5$s\n"
                "     --stop-delay=SECS         How long to leave user services running after\n"
                "                               logout\n"
@@ -2215,6 +2219,7 @@ static int parse_argv(int argc, char *argv[]) {
                 ARG_CIFS_DOMAIN,
                 ARG_CIFS_USER_NAME,
                 ARG_CIFS_SERVICE,
+                ARG_CIFS_EXTRA_MOUNT_OPTIONS,
                 ARG_TASKS_MAX,
                 ARG_MEMORY_HIGH,
                 ARG_MEMORY_MAX,
@@ -2245,6 +2250,7 @@ static int parse_argv(int argc, char *argv[]) {
                 ARG_RECOVERY_KEY,
                 ARG_AND_RESIZE,
                 ARG_AND_CHANGE_PASSWORD,
+                ARG_DROP_CACHES,
         };
 
         static const struct option options[] = {
@@ -2306,6 +2312,7 @@ static int parse_argv(int argc, char *argv[]) {
                 { "cifs-user-name",              required_argument, NULL, ARG_CIFS_USER_NAME              },
                 { "cifs-domain",                 required_argument, NULL, ARG_CIFS_DOMAIN                 },
                 { "cifs-service",                required_argument, NULL, ARG_CIFS_SERVICE                },
+                { "cifs-extra-mount-options",    required_argument, NULL, ARG_CIFS_EXTRA_MOUNT_OPTIONS    },
                 { "rate-limit-interval",         required_argument, NULL, ARG_RATE_LIMIT_INTERVAL         },
                 { "rate-limit-burst",            required_argument, NULL, ARG_RATE_LIMIT_BURST            },
                 { "stop-delay",                  required_argument, NULL, ARG_STOP_DELAY                  },
@@ -2327,6 +2334,7 @@ static int parse_argv(int argc, char *argv[]) {
                 { "recovery-key",                required_argument, NULL, ARG_RECOVERY_KEY                },
                 { "and-resize",                  required_argument, NULL, ARG_AND_RESIZE                  },
                 { "and-change-password",         required_argument, NULL, ARG_AND_CHANGE_PASSWORD         },
+                { "drop-caches",                 required_argument, NULL, ARG_DROP_CACHES                 },
                 {}
         };
 
@@ -2444,16 +2452,16 @@ static int parse_argv(int argc, char *argv[]) {
                 case ARG_ICON_NAME:
                 case ARG_CIFS_USER_NAME:
                 case ARG_CIFS_DOMAIN:
-                case ARG_CIFS_SERVICE: {
+                case ARG_CIFS_EXTRA_MOUNT_OPTIONS: {
 
                         const char *field =
-                                c == ARG_EMAIL_ADDRESS ? "emailAddress" :
-                                     c == ARG_LOCATION ? "location" :
-                                    c == ARG_ICON_NAME ? "iconName" :
-                               c == ARG_CIFS_USER_NAME ? "cifsUserName" :
-                                  c == ARG_CIFS_DOMAIN ? "cifsDomain" :
-                                 c == ARG_CIFS_SERVICE ? "cifsService" :
-                                                         NULL;
+                                           c == ARG_EMAIL_ADDRESS ? "emailAddress" :
+                                                c == ARG_LOCATION ? "location" :
+                                               c == ARG_ICON_NAME ? "iconName" :
+                                          c == ARG_CIFS_USER_NAME ? "cifsUserName" :
+                                             c == ARG_CIFS_DOMAIN ? "cifsDomain" :
+                                c == ARG_CIFS_EXTRA_MOUNT_OPTIONS ? "cifsExtraMountOptions" :
+                                                                    NULL;
 
                         assert(field);
 
@@ -2471,6 +2479,25 @@ static int parse_argv(int argc, char *argv[]) {
 
                         break;
                 }
+
+                case ARG_CIFS_SERVICE:
+                        if (isempty(optarg)) {
+                                r = drop_from_identity("cifsService");
+                                if (r < 0)
+                                        return r;
+
+                                break;
+                        }
+
+                        r = parse_cifs_service(optarg, NULL, NULL, NULL);
+                        if (r < 0)
+                                return log_error_errno(r, "Failed to validate CIFS service name: %s", optarg);
+
+                        r = json_variant_set_field_string(&arg_identity_extra, "cifsService", optarg);
+                        if (r < 0)
+                                return log_error_errno(r, "Failed to set cifsService field: %m");
+
+                        break;
 
                 case ARG_PASSWORD_HINT:
                         if (isempty(optarg)) {
@@ -3449,6 +3476,26 @@ static int parse_argv(int argc, char *argv[]) {
                 case ARG_AND_CHANGE_PASSWORD:
                         arg_and_change_password = true;
                         break;
+
+                case ARG_DROP_CACHES: {
+                        bool drop_caches;
+
+                        if (isempty(optarg)) {
+                                r = drop_from_identity("dropCaches");
+                                if (r < 0)
+                                        return r;
+                        }
+
+                        r = parse_boolean_argument("--drop-caches=", optarg, &drop_caches);
+                        if (r < 0)
+                                return r;
+
+                        r = json_variant_set_field_boolean(&arg_identity_extra, "dropCaches", r);
+                        if (r < 0)
+                                return log_error_errno(r, "Failed to set drop caches field: %m");
+
+                        break;
+                }
 
                 case '?':
                         return -EINVAL;

@@ -811,7 +811,7 @@ static void write_to_journal(Server *s, uid_t uid, struct iovec *iovec, size_t n
                  * to ensure that the entries in the journal files are strictly ordered by time, in order to ensure
                  * bisection works correctly. */
 
-                log_debug("Time jumped backwards, rotating.");
+                log_info("Time jumped backwards, rotating.");
                 rotate = true;
         } else {
 
@@ -819,8 +819,8 @@ static void write_to_journal(Server *s, uid_t uid, struct iovec *iovec, size_t n
                 if (!f)
                         return;
 
-                if (journal_file_rotate_suggested(f, s->max_file_usec)) {
-                        log_debug("%s: Journal header limits reached or header out-of-date, rotating.", f->path);
+                if (journal_file_rotate_suggested(f, s->max_file_usec, LOG_INFO)) {
+                        log_info("%s: Journal header limits reached or header out-of-date, rotating.", f->path);
                         rotate = true;
                 }
         }
@@ -847,6 +847,8 @@ static void write_to_journal(Server *s, uid_t uid, struct iovec *iovec, size_t n
                 log_error_errno(r, "Failed to write entry (%zu items, %zu bytes), ignoring: %m", n, IOVEC_TOTAL_SIZE(iovec, n));
                 return;
         }
+
+        log_info_errno(r, "Failed to write entry (%zu items, %zu bytes), rotating before retrying: %m", n, IOVEC_TOTAL_SIZE(iovec, n));
 
         server_rotate(s);
         server_vacuum(s, false);
@@ -1172,6 +1174,8 @@ int server_flush_to_var(Server *s, bool require_flag_file) {
                         goto finish;
                 }
 
+                log_info("Rotating system journal.");
+
                 server_rotate(s);
                 server_vacuum(s, false);
 
@@ -1428,7 +1432,7 @@ static int dispatch_sigusr2(sd_event_source *es, const struct signalfd_siginfo *
 
         assert(s);
 
-        log_info("Received SIGUSR2 signal from PID " PID_FMT ", as request to rotate journal.", si->ssi_pid);
+        log_info("Received SIGUSR2 signal from PID " PID_FMT ", as request to rotate journal, rotating.", si->ssi_pid);
         server_full_rotate(s);
 
         return 0;
@@ -1760,13 +1764,10 @@ static int dispatch_notify_event(sd_event_source *es, int fd, uint32_t revents, 
          * there's something to send it will be turned on again. */
 
         if (!s->sent_notify_ready) {
-                static const char p[] =
-                        "READY=1\n"
-                        "STATUS=Processing requests...";
-                ssize_t l;
+                static const char p[] = "READY=1\n"
+                                        "STATUS=Processing requests...";
 
-                l = send(s->notify_fd, p, strlen(p), MSG_DONTWAIT);
-                if (l < 0) {
+                if (send(s->notify_fd, p, strlen(p), MSG_DONTWAIT) < 0) {
                         if (errno == EAGAIN)
                                 return 0;
 
@@ -1777,14 +1778,9 @@ static int dispatch_notify_event(sd_event_source *es, int fd, uint32_t revents, 
                 log_debug("Sent READY=1 notification.");
 
         } else if (s->send_watchdog) {
+                static const char p[] = "WATCHDOG=1";
 
-                static const char p[] =
-                        "WATCHDOG=1";
-
-                ssize_t l;
-
-                l = send(s->notify_fd, p, strlen(p), MSG_DONTWAIT);
-                if (l < 0) {
+                if (send(s->notify_fd, p, strlen(p), MSG_DONTWAIT) < 0) {
                         if (errno == EAGAIN)
                                 return 0;
 
@@ -1970,7 +1966,7 @@ static int vl_method_rotate(Varlink *link, JsonVariant *parameters, VarlinkMetho
         if (json_variant_elements(parameters) > 0)
                 return varlink_error_invalid_parameter(link, parameters);
 
-        log_info("Received client request to rotate journal.");
+        log_info("Received client request to rotate journal, rotating.");
         server_full_rotate(s);
 
         return varlink_reply(link, NULL);

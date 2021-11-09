@@ -437,6 +437,15 @@ int link_drop_neighbors(Link *link) {
         return r;
 }
 
+void link_foreignize_neighbors(Link *link) {
+        Neighbor *neighbor;
+
+        assert(link);
+
+        SET_FOREACH(neighbor, link->neighbors)
+                neighbor->source = NETWORK_CONFIG_SOURCE_FOREIGN;
+}
+
 int request_process_neighbor(Request *req) {
         int r;
 
@@ -543,7 +552,7 @@ int manager_rtnl_process_neighbor(sd_netlink *rtnl, sd_netlink_message *message,
         case RTM_NEWNEIGH:
                 if (neighbor) {
                         neighbor_enter_configured(neighbor);
-                        log_neighbor_debug(tmp, "Received remembered", link);
+                        log_neighbor_debug(neighbor, "Received remembered", link);
                 } else {
                         neighbor_enter_configured(tmp);
                         log_neighbor_debug(tmp, "Remembering", link);

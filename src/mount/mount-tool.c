@@ -1432,7 +1432,7 @@ static int list_devices(void) {
                 }
         }
 
-        (void) pager_open(arg_pager_flags);
+        pager_open(arg_pager_flags);
 
         r = table_print(table, NULL);
         if (r < 0)
@@ -1458,7 +1458,7 @@ static int run(int argc, char* argv[]) {
 
         r = bus_connect_transport_systemd(arg_transport, arg_host, arg_user, &bus);
         if (r < 0)
-                return bus_log_connect_error(r);
+                return bus_log_connect_error(r, arg_transport);
 
         if (arg_action == ACTION_UMOUNT)
                 return action_umount(bus, argc, argv);

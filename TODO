@@ -81,6 +81,43 @@ Janitorial Clean-ups:
 
 Features:
 
+* add tiny service that decrypts encrypted user records passed via initrd
+  credential logic and drops them into /run where nss-systemd can pick them up,
+  similar to /run/host/userdb/. Usecase: drop a root user JSON record there,
+  and use it in the initrd to log in as root with locally selected password,
+  for debugging purposes.
+
+* drop dependency on libcap, replace by direct syscalls based on
+  CapabilityQuintet we already have. (This likely allows us drop drop libcap
+  dep in the base OS image)
+
+* sysext: automatically activate sysext images dropped in via new sd-stub
+  sysext pickup logic.
+
+* add concept for "exitrd" as inverse of "initrd", that we can transition to at
+  shutdown, and has similar security semantics. This should then take the place
+  of dracut's shutdown logic. Should probably support sysexts too. Care needs
+  to be taken that the resulting logic ends up in RAM, i.e. is copied out of
+  on-disk storage.
+
+* sd-stub: automatically pick up microcode from ESP and synthesize initrd from
+  it, and measure it. Signing is not necessary, as microcode does that on its
+  own. Pass as first initrd to kernel.
+
+* userdbd: implement an additional varlink service socket that provides the
+  host user db in restricted form, then allow this to be bind mounted into
+  sandboxed environments that want the host database in minimal form. All
+  records would be stripped of all meta info, except the basic UID/name
+  info. Then use this in portabled environments that do not use PrivateUsers=1.
+
+* logind introduce two types of sessions: "heavy" and "light". The former would
+  be our current sessions. But the latter would be a new type of session that
+  is mostly the same but does not pull in user@.service or wait for it. Then,
+  allow configuration which type of session is desired via pam_systemd
+  parameters, and then make user@.service's session one of these "light" ones.
+  People could then choose to make FTP sessions and suchlike "light" if they
+  don't want the service manager to be started for that.
+
 * /etc/veritytab: allow that the roothash column can be specified as fs path
   including a path to an AF_UNIX path, similar to how we do things with the
   keys of /etc/crypttab. That way people can store/provide the roothash
@@ -226,9 +263,6 @@ Features:
 
 * introduce a new group to own TPM devices
 
-* cryptenroll: politely refuse enrolling new keys to homed volumes, since we
-  we cannot update identity info
-
 * cryptsetup: if only recovery keys are registered and no regular passphrases,
   ask user for "recovery key", not "passphrase"
 
@@ -281,6 +315,9 @@ Features:
 
 * special case some calls of chase_symlinks() to use openat2() internally, so
   that the kernel does what we otherwise do.
+
+* add a new flag to chase_symlinks() that stops chasing once the first missing
+  component is found and then allows the caller to create the rest.
 
 * make use of new glibc 2.32 APIs sigabbrev_np() and strerrorname_np().
 
@@ -352,11 +389,9 @@ Features:
 
 * unify on openssl (as soon as OpenSSL 3.0 is out, and the Debian license
   confusion is gone)
-  - port sd_id128_get_machine_app_specific() over from khash
   - port resolved over from libgcrypt (DNSSEC code)
   - port journald + fsprg over from libgcrypt
   - port importd over from libgcrypt
-  - when that's done: kill khash.c
   - when that's done: kill gnutls support in resolved
 
 * add growvol and makevol options for /etc/crypttab, similar to
@@ -1244,8 +1279,6 @@ Features:
   - support new FS_IOC_ADD_ENCRYPTION_KEY ioctl for setting up fscrypt
   - maybe pre-create ~/.cache as subvol so that it can have separate quota
     easily?
-  - if kernel 5.12 uid mapping mounts exist, use that instead of recursive
-    chowns.
   - add a switch to homectl (maybe called --first-boot) where it will check if
     any non-system users exist, and if not prompts interactively for basic user
     info, mimicking systemd-firstboot. Then, place this in a service that runs
@@ -1253,10 +1286,6 @@ Features:
     fallback logic to get a regular user created on uninitialized systems.
   - store PKCS#11 + FIDO2 token info in LUKS2 header, compatible with
     systemd-cryptsetup, so that it can unlock homed volumes
-  - try to unmount in regular intervals when home dir was busy when we
-    tried because idle.
-  - keep an fd to the homedir open at all times, to keep the fs pinned
-    (autofs and such) while user is logged in.
 
 * add a new switch --auto-definitions=yes/no or so to systemd-repart. If
   specified, synthesize a definition automatically if we can: enlarge last

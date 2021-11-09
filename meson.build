@@ -252,6 +252,7 @@ conf.set_quoted('SYSTEMD_GROWFS_PATH',                        rootlibexecdir / '
 conf.set_quoted('SYSTEMD_HOMEWORK_PATH',                      rootlibexecdir / 'systemd-homework')
 conf.set_quoted('SYSTEMD_IMPORT_FS_PATH',                     rootlibexecdir / 'systemd-import-fs')
 conf.set_quoted('SYSTEMD_IMPORT_PATH',                        rootlibexecdir / 'systemd-import')
+conf.set_quoted('SYSTEMD_INTEGRITYSETUP_PATH',                rootlibexecdir / 'systemd-integritysetup')
 conf.set_quoted('SYSTEMD_KBD_MODEL_MAP',                      pkgdatadir / 'kbd-model-map')
 conf.set_quoted('SYSTEMD_LANGUAGE_FALLBACK_MAP',              pkgdatadir / 'language-fallback-map')
 conf.set_quoted('SYSTEMD_MAKEFS_PATH',                        rootlibexecdir / 'systemd-makefs')
@@ -386,10 +387,15 @@ endif
 # --as-needed and --no-undefined are provided by meson by default,
 # run 'meson configure' to see what is enabled
 possible_link_flags = [
-        '-Wl,-z,relro',
+        '-Wl,--fatal-warnings',
         '-Wl,-z,now',
+        '-Wl,-z,relro',
         '-fstack-protector',
 ]
+
+if get_option('b_sanitize') == 'none'
+        possible_link_flags += '-Wl,--warn-common'
+endif
 
 if cc.get_id() == 'clang'
         possible_common_cc_flags += [
@@ -546,6 +552,7 @@ foreach ident : [
         ['mount_setattr',     '''#include <sys/mount.h>'''],
         ['move_mount',        '''#include <sys/mount.h>'''],
         ['open_tree',         '''#include <sys/mount.h>'''],
+        ['getdents64',        '''#include <dirent.h>'''],
 ]
 
         have = cc.has_function(ident[0], prefix : ident[1], args : '-D_GNU_SOURCE')
@@ -2534,6 +2541,25 @@ if conf.get('HAVE_LIBCRYPTSETUP') == 1
                                 libp11kit],
                 install_rpath : rootlibexecdir,
                 install : true)
+
+        executable(
+                'systemd-integritysetup',
+                ['src/integritysetup/integritysetup.c', 'src/integritysetup/integrity-util.c'],
+                include_directories : includes,
+                link_with : [libshared],
+                dependencies : [libcryptsetup],
+                install_rpath : rootlibexecdir,
+                install : true,
+                install_dir : rootlibexecdir)
+
+        executable(
+                'systemd-integritysetup-generator',
+                ['src/integritysetup/integritysetup-generator.c', 'src/integritysetup/integrity-util.c'],
+                include_directories : includes,
+                link_with : [libshared],
+                install_rpath : rootlibexecdir,
+                install : true,
+                install_dir : systemgeneratordir)
 endif
 
 if conf.get('HAVE_SYSV_COMPAT') == 1
@@ -2597,18 +2623,17 @@ endif
 
 if conf.get('ENABLE_LOCALED') == 1
         if conf.get('HAVE_XKBCOMMON') == 1
-                # logind will load libxkbcommon.so dynamically on its own
-                deps = [libdl]
-                extra_includes = [libxkbcommon.get_pkgconfig_variable('includedir')]
+                # logind will load libxkbcommon.so dynamically on its own, but we still
+                # need to specify where the headers are
+                deps = [libdl, libxkbcommon.partial_dependency(compile_args: true)]
         else
                 deps = []
-                extra_includes = []
         endif
 
         executable(
                 'systemd-localed',
                 systemd_localed_sources,
-                include_directories : includes + extra_includes,
+                include_directories : includes,
                 link_with : [libshared],
                 dependencies : deps,
                 install_rpath : rootlibexecdir,

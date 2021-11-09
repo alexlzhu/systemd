@@ -243,15 +243,15 @@ static void test_foreach_pointer(void) {
                 k++;
         }
 
-        assert(k == 3);
+        assert_se(k == 3);
 
         FOREACH_POINTER(i, &b) {
-                assert(k == 3);
-                assert(i == &b);
+                assert_se(k == 3);
+                assert_se(i == &b);
                 k = 4;
         }
 
-        assert(k == 4);
+        assert_se(k == 4);
 
         FOREACH_POINTER(i, NULL, &c, NULL, &b, NULL, &a, NULL) {
                 switch (k) {
@@ -292,7 +292,7 @@ static void test_foreach_pointer(void) {
                 k++;
         }
 
-        assert(k == 11);
+        assert_se(k == 11);
 }
 
 static void test_align_to(void) {
@@ -325,6 +325,84 @@ static void test_align_to(void) {
         assert_se(ALIGN_TO(SIZE_MAX-2, 4) == SIZE_MAX); /* overflow */
         assert_se(ALIGN_TO(SIZE_MAX-1, 4) == SIZE_MAX); /* overflow */
         assert_se(ALIGN_TO(SIZE_MAX, 4) == SIZE_MAX);   /* overflow */
+
+        assert_cc(CONST_ALIGN_TO(96, 512) == 512);
+        assert_cc(CONST_ALIGN_TO(511, 512) == 512);
+        assert_cc(CONST_ALIGN_TO(512, 512) == 512);
+        assert_cc(CONST_ALIGN_TO(513, 512) == 1024);
+        assert_cc(CONST_ALIGN_TO(sizeof(int), 64) == 64);
+
+        assert_cc(__builtin_types_compatible_p(typeof(CONST_ALIGN_TO(4, 3)), void));
+        assert_cc(__builtin_types_compatible_p(typeof(CONST_ALIGN_TO(SIZE_MAX, 512)), void));
+}
+
+static void test_flags(void) {
+        enum {
+                F1 = 1 << 0,
+                F2 = 1 << 1,
+                F3 = 1 << 2,
+                F_ALL = F1 | F2 | F3
+        };
+        unsigned n, f;
+
+        log_info("/* %s */", __func__);
+
+        assert_se(FLAGS_SET(0, 0));
+        assert_se(FLAGS_SET(F1, F1));
+        assert_se(FLAGS_SET(F1 | F2, F1));
+        assert_se(FLAGS_SET(F1 | F3, F1 | F3));
+        assert_se(FLAGS_SET(F1 | F2 | F3, F_ALL));
+        assert_se(!FLAGS_SET(0, F1));
+        assert_se(!FLAGS_SET(F2, F1));
+        assert_se(!FLAGS_SET(F1 | F2, F3));
+        assert_se(!FLAGS_SET(F1 | F2, F1 | F3));
+        assert_se(!FLAGS_SET(F1 | F2 | F3, ~F_ALL));
+
+        // Check for no double eval.
+        n = F2;
+        f = F1;
+        assert_se(!FLAGS_SET(--n, ++f));
+        assert_se(n == F1);
+        assert_se(f == F2);
+
+        SET_FLAG(n, F3, true);
+        assert_se(n == (F1 | F3));
+        SET_FLAG(n, F2, false);
+        assert_se(n == (F1 | F3));
+        SET_FLAG(n, F3, false);
+        assert_se(n == F1);
+        SET_FLAG(n, F1, true);
+        assert_se(n == F1);
+        SET_FLAG(n, F1 | F3, true);
+        assert_se(n == (F1 | F3));
+        SET_FLAG(n, F_ALL, false);
+        assert_se(n == 0);
+
+        assert_se(UPDATE_FLAG(0, 0, true) == 0);
+        assert_se(UPDATE_FLAG(0, F1, true) == F1);
+        assert_se(UPDATE_FLAG(0, F1 | F2, true) == (F1 | F2));
+        assert_se(UPDATE_FLAG(F1, 0, true) == F1);
+        assert_se(UPDATE_FLAG(F1, F1, true) == F1);
+        assert_se(UPDATE_FLAG(F1, F3, true) == (F1 | F3));
+        assert_se(UPDATE_FLAG(F1, F1 | F3, true) == (F1 | F3));
+        assert_se(UPDATE_FLAG(F1, F_ALL, true) == F_ALL);
+        assert_se(UPDATE_FLAG(0, 0, false) == 0);
+        assert_se(UPDATE_FLAG(0, F1, false) == 0);
+        assert_se(UPDATE_FLAG(0, F1 | F2, false) == 0);
+        assert_se(UPDATE_FLAG(F1, 0, false) == F1);
+        assert_se(UPDATE_FLAG(F1, F1, false) == 0);
+        assert_se(UPDATE_FLAG(F1, F3, false) == F1);
+        assert_se(UPDATE_FLAG(F1, F1 | F3, false) == 0);
+        assert_se(UPDATE_FLAG(F1, F2 | F3, false) == F1);
+        assert_se(UPDATE_FLAG(F1, F_ALL, false) == 0);
+        assert_se(UPDATE_FLAG(F_ALL, F_ALL, false) == 0);
+
+        // Check for no double eval.
+        n = F2;
+        f = F1;
+        assert_se(UPDATE_FLAG(--n, ++f, true) == (F1 | F2));
+        assert_se(n == F1);
+        assert_se(f == F2);
 }
 
 int main(int argc, char *argv[]) {
@@ -338,6 +416,7 @@ int main(int argc, char *argv[]) {
         test_foreach_pointer();
         test_ptr_to_int();
         test_align_to();
+        test_flags();
 
         return 0;
 }

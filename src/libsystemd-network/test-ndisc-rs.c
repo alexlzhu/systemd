@@ -242,7 +242,6 @@ static void test_callback(sd_ndisc *nd, sd_ndisc_event_t event, sd_ndisc_router 
                 ND_RA_FLAG_MANAGED
         };
         uint64_t flags;
-        uint32_t mtu;
 
         assert_se(nd);
 
@@ -263,8 +262,6 @@ static void test_callback(sd_ndisc *nd, sd_ndisc_event_t event, sd_ndisc_router 
                 return;
         }
 
-        assert_se(sd_ndisc_get_mtu(nd, &mtu) == -ENODATA);
-
         sd_event_exit(e, 0);
 }
 
@@ -273,7 +270,7 @@ static void test_rs(void) {
         sd_ndisc *nd;
 
         if (verbose)
-                printf("* %s\n", __FUNCTION__);
+                printf("* %s\n", __func__);
 
         send_ra_function = send_ra;
 
@@ -366,7 +363,7 @@ static void test_timeout(void) {
         sd_ndisc *nd;
 
         if (verbose)
-                printf("* %s\n", __FUNCTION__);
+                printf("* %s\n", __func__);
 
         send_ra_function = test_timeout_value;
 

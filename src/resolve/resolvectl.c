@@ -623,7 +623,7 @@ static int resolve_rfc4501(sd_bus *bus, const char *name) {
 
         q = strchr(p, '?');
         if (q) {
-                n = strndupa(p, q - p);
+                n = strndupa_safe(p, q - p);
                 q++;
 
                 for (;;) {
@@ -1001,7 +1001,7 @@ static int resolve_tlsa(sd_bus *bus, const char *family, const char *address) {
                 if (r < 0)
                         return log_error_errno(r, "Invalid port \"%s\".", port + 1);
 
-                address = strndupa(address, port - address);
+                address = strndupa_safe(address, port - address);
         }
 
         r = asprintf(&full, "_%u._%s.%s",
@@ -1587,7 +1587,7 @@ static int status_ifindex(sd_bus *bus, int ifindex, const char *name, StatusMode
         if (r < 0)
                 return log_error_errno(r, "Failed to get link data for %i: %s", ifindex, bus_error_message(&error, r));
 
-        (void) pager_open(arg_pager_flags);
+        pager_open(arg_pager_flags);
 
         if (mode == STATUS_DNS)
                 return status_print_strv_ifindex(ifindex, name, link_info.dns_ex ?: link_info.dns);
@@ -1851,7 +1851,7 @@ static int status_global(sd_bus *bus, StatusMode mode, bool *empty_line) {
         if (r < 0)
                 return log_error_errno(r, "Failed to get global data: %s", bus_error_message(&error, r));
 
-        (void) pager_open(arg_pager_flags);
+        pager_open(arg_pager_flags);
 
         if (mode == STATUS_DNS)
                 return status_print_strv_global(global_info.dns_ex ?: global_info.dns);

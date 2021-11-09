@@ -13,7 +13,6 @@ test_include_dir = include_directories('.')
 
 path = run_command(sh, '-c', 'echo "$PATH"').stdout().strip()
 test_env = environment()
-test_env.set('SYSTEMD_KBD_MODEL_MAP', kbd_model_map)
 test_env.set('SYSTEMD_LANGUAGE_FALLBACK_MAP', language_fallback_map)
 test_env.set('PATH', project_build_root + ':' + path)
 
@@ -227,7 +226,9 @@ tests += [
 
         [['src/test/test-proc-cmdline.c']],
 
-        [['src/test/test-fd-util.c']],
+        [['src/test/test-fd-util.c'],
+         [],
+         [libseccomp]],
 
         [['src/test/test-web-util.c']],
 
@@ -569,7 +570,7 @@ tests += [
         [['src/test/test-af-list.c',
           generated_gperf_headers]],
 
-        [['src/test/test-arphrd-list.c',
+        [['src/test/test-arphrd-util.c',
           generated_gperf_headers]],
 
         [['src/test/test-ip-protocol-list.c',
@@ -591,8 +592,6 @@ tests += [
         [['src/test/test-udev-util.c']],
 
         [['src/test/test-id128.c']],
-
-        [['src/test/test-hash.c']],
 
         [['src/test/test-gcrypt-util.c'],
          [], [], [], 'HAVE_GCRYPT'],
@@ -629,6 +628,8 @@ tests += [
 
         [['src/test/test-nscd-flush.c'],
          [], [], [], 'ENABLE_NSCD', 'manual'],
+
+        [['src/test/test-hmac.c']],
 ]
 
 ############################################################

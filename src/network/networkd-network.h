@@ -26,10 +26,6 @@
 #include "resolve-util.h"
 #include "socket-netlink.h"
 
-/* Special values for *_uplink_index. */
-#define UPLINK_INDEX_AUTO  0 /* uplink will be selected automatically */
-#define UPLINK_INDEX_NONE -1 /* uplink will not be selected automatically */
-
 typedef enum KeepConfiguration {
         KEEP_CONFIGURATION_NO            = 0,
         KEEP_CONFIGURATION_DHCP_ON_START = 1 << 0,
@@ -76,7 +72,7 @@ struct Network {
 
         char *name;
         char *filename;
-        usec_t timestamp;
+        Hashmap *stats_by_path;
         char *description;
 
         /* [Match] section */
@@ -169,12 +165,12 @@ struct Network {
 
         /* DHCPv6 Client support */
         bool dhcp6_use_address;
+        bool dhcp6_use_pd_prefix;
         bool dhcp6_use_dns;
         bool dhcp6_use_dns_set;
         bool dhcp6_use_hostname;
         bool dhcp6_use_ntp;
         bool dhcp6_use_ntp_set;
-        bool dhcp6_rapid_commit;
         bool dhcp6_route_table;
         bool dhcp6_route_table_set;
         bool dhcp6_route_table_set_explicitly;
@@ -184,17 +180,15 @@ struct Network {
         bool dhcp6_iaid_set;
         bool dhcp6_iaid_set_explicitly;
         DUID dhcp6_duid;
-        uint8_t dhcp6_pd_length;
+        uint8_t dhcp6_pd_prefix_length;
+        struct in6_addr dhcp6_pd_prefix_hint;
         char *dhcp6_mudurl;
         char **dhcp6_user_class;
         char **dhcp6_vendor_class;
-        struct in6_addr dhcp6_pd_address;
-        DHCP6ClientStartMode dhcp6_without_ra;
+        DHCP6ClientStartMode dhcp6_client_start_mode;
         OrderedHashmap *dhcp6_client_send_options;
         OrderedHashmap *dhcp6_client_send_vendor_options;
         Set *dhcp6_request_options;
-        /* Start DHCPv6 PD also when 'O' RA flag is set, see RFC 7084, WPD-4 */
-        bool dhcp6_force_pd_other_information;
 
         /* DHCP Server Support */
         bool dhcp_server;
@@ -208,6 +202,7 @@ struct Network {
         char *dhcp_server_relay_agent_remote_id;
         NetworkDHCPServerEmitAddress dhcp_server_emit[_SD_DHCP_LEASE_SERVER_TYPE_MAX];
         bool dhcp_server_emit_router;
+        struct in_addr dhcp_server_router;
         bool dhcp_server_emit_timezone;
         char *dhcp_server_timezone;
         usec_t dhcp_server_default_lease_time_usec, dhcp_server_max_lease_time_usec;
@@ -245,6 +240,8 @@ struct Network {
         int64_t dhcp6_pd_subnet_id;
         uint32_t dhcp6_pd_route_metric;
         Set *dhcp6_pd_tokens;
+        int dhcp6_pd_uplink_index;
+        char *dhcp6_pd_uplink_name;
 
         /* Bridge Support */
         int use_bpdu;
@@ -304,6 +301,8 @@ struct Network {
         /* IPv6 accept RA */
         int ipv6_accept_ra;
         bool ipv6_accept_ra_use_dns;
+        bool ipv6_accept_ra_use_gateway;
+        bool ipv6_accept_ra_use_route_prefix;
         bool ipv6_accept_ra_use_autonomous_prefix;
         bool ipv6_accept_ra_use_onlink_prefix;
         bool ipv6_accept_ra_use_mtu;
@@ -385,7 +384,6 @@ CONFIG_PARSER_PROTOTYPE(config_parse_keep_configuration);
 CONFIG_PARSER_PROTOTYPE(config_parse_ipv6_link_local_address_gen_mode);
 CONFIG_PARSER_PROTOTYPE(config_parse_activation_policy);
 CONFIG_PARSER_PROTOTYPE(config_parse_link_group);
-CONFIG_PARSER_PROTOTYPE(config_parse_uplink);
 
 const struct ConfigPerfItem* network_network_gperf_lookup(const char *key, GPERF_LEN_TYPE length);
 

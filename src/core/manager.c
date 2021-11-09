@@ -3215,12 +3215,8 @@ void manager_set_watchdog(Manager *m, WatchdogType t, usec_t timeout) {
                 return;
 
         if (t == WATCHDOG_RUNTIME)
-                if (!timestamp_is_set(m->watchdog_overridden[WATCHDOG_RUNTIME])) {
-                        if (timestamp_is_set(timeout))
-                                (void) watchdog_setup(timeout);
-                        else
-                                watchdog_close(true);
-                }
+                if (!timestamp_is_set(m->watchdog_overridden[WATCHDOG_RUNTIME]))
+                        (void) watchdog_setup(timeout);
 
         m->watchdog[t] = timeout;
 }
@@ -3238,10 +3234,7 @@ int manager_override_watchdog(Manager *m, WatchdogType t, usec_t timeout) {
         if (t == WATCHDOG_RUNTIME) {
                 usec_t usec = timestamp_is_set(timeout) ? timeout : m->watchdog[t];
 
-                if (timestamp_is_set(usec))
-                        (void) watchdog_setup(usec);
-                else
-                        watchdog_close(true);
+                (void) watchdog_setup(usec);
         }
 
         m->watchdog_overridden[t] = timeout;
@@ -3464,27 +3457,38 @@ static void manager_notify_finished(Manager *m) {
 }
 
 static void user_manager_send_ready(Manager *m) {
+        int r;
+
         assert(m);
 
         /* We send READY=1 on reaching basic.target only when running in --user mode. */
         if (!MANAGER_IS_USER(m) || m->ready_sent)
                 return;
 
-        sd_notifyf(false,
-                   "READY=1\n"
-                   "STATUS=Reached " SPECIAL_BASIC_TARGET ".");
+        r = sd_notify(false,
+                      "READY=1\n"
+                      "STATUS=Reached " SPECIAL_BASIC_TARGET ".");
+        if (r < 0)
+                log_warning_errno(r, "Failed to send readiness notification, ignoring: %m");
+
         m->ready_sent = true;
         m->status_ready = false;
 }
 
 static void manager_send_ready(Manager *m) {
+        int r;
+
         if (m->ready_sent && m->status_ready)
                 /* Skip the notification if nothing changed. */
                 return;
 
-        sd_notifyf(false,
-                   "%sSTATUS=Ready.",
-                   m->ready_sent ? "READY=1\n" : "");
+        r = sd_notify(false,
+                      "READY=1\n"
+                      "STATUS=Ready.");
+        if (r < 0)
+                log_full_errno(m->ready_sent ? LOG_DEBUG : LOG_WARNING, r,
+                               "Failed to send readiness notification, ignoring: %m");
+
         m->ready_sent = m->status_ready = true;
 }
 

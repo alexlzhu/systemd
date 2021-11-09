@@ -29,6 +29,7 @@
 #include "process-util.h"
 #include "signal-util.h"
 #include "sort-util.h"
+#include "special.h"
 #include "string-table.h"
 #include "systemctl-list-machines.h"
 #include "systemctl-list-units.h"
@@ -89,7 +90,7 @@ static int exec_status_info_deserialize(sd_bus_message *m, ExecStatusInfo *i, bo
         r = sd_bus_message_enter_container(m, SD_BUS_TYPE_STRUCT, is_ex_prop ? "sasasttttuii" : "sasbttttuii");
         if (r < 0)
                 return bus_log_parse_error(r);
-        else if (r == 0)
+        if (r == 0)
                 return 0;
 
         r = sd_bus_message_read(m, "s", &path);
@@ -710,14 +711,10 @@ static void print_status_info(
 
                 printf("     CGroup: %s\n", i->control_group);
 
-                c = columns();
-                if (c > sizeof(prefix) - 1)
-                        c -= sizeof(prefix) - 1;
-                else
-                        c = 0;
+                c = LESS_BY(columns(), strlen(prefix));
 
                 r = unit_show_processes(bus, i->id, i->control_group, prefix, c, get_output_flags(), &error);
-                if (r == -EBADR) {
+                if (r == -EBADR && arg_transport == BUS_TRANSPORT_LOCAL) {
                         unsigned k = 0;
                         pid_t extra[2];
 
@@ -1617,11 +1614,13 @@ static int print_property(const char *name, const char *expected_value, sd_bus_m
 
                                 r = sd_bus_message_enter_container(m, 'r', "ssba(ss)");
                                 if (r < 0)
-                                        return r;
+                                        return bus_log_parse_error(r);
+                                if (r == 0)
+                                        break;
 
                                 r = sd_bus_message_read(m, "ssb", &source, &destination, &ignore_enoent);
-                                if (r <= 0)
-                                        break;
+                                if (r < 0)
+                                        return bus_log_parse_error(r);
 
                                 str = strjoin(ignore_enoent ? "-" : "",
                                               source,
@@ -1632,27 +1631,81 @@ static int print_property(const char *name, const char *expected_value, sd_bus_m
 
                                 r = sd_bus_message_enter_container(m, 'a', "(ss)");
                                 if (r < 0)
-                                        return r;
+                                        return bus_log_parse_error(r);
 
                                 while ((r = sd_bus_message_read(m, "(ss)", &partition, &mount_options)) > 0)
-                                        if (!strextend_with_separator(&str, ":", partition, ":", mount_options))
+                                        if (!strextend_with_separator(&str, ":", partition, mount_options))
                                                 return log_oom();
                                 if (r < 0)
-                                        return r;
+                                        return bus_log_parse_error(r);
 
                                 if (!strextend_with_separator(&paths, " ", str))
                                         return log_oom();
 
                                 r = sd_bus_message_exit_container(m);
                                 if (r < 0)
-                                        return r;
+                                        return bus_log_parse_error(r);
 
                                 r = sd_bus_message_exit_container(m);
                                 if (r < 0)
-                                        return r;
+                                        return bus_log_parse_error(r);
                         }
+
+                        r = sd_bus_message_exit_container(m);
                         if (r < 0)
                                 return bus_log_parse_error(r);
+
+                        bus_print_property_value(name, expected_value, flags, paths);
+
+                        return 1;
+
+                } else if (streq(name, "ExtensionImages")) {
+                        _cleanup_free_ char *paths = NULL;
+
+                        r = sd_bus_message_enter_container(m, SD_BUS_TYPE_ARRAY, "(sba(ss))");
+                        if (r < 0)
+                                return bus_log_parse_error(r);
+
+                        for (;;) {
+                                _cleanup_free_ char *str = NULL;
+                                const char *source, *partition, *mount_options;
+                                int ignore_enoent;
+
+                                r = sd_bus_message_enter_container(m, 'r', "sba(ss)");
+                                if (r < 0)
+                                        return bus_log_parse_error(r);
+                                if (r == 0)
+                                        break;
+
+                                r = sd_bus_message_read(m, "sb", &source, &ignore_enoent);
+                                if (r < 0)
+                                        return bus_log_parse_error(r);
+
+                                str = strjoin(ignore_enoent ? "-" : "", source);
+                                if (!str)
+                                        return log_oom();
+
+                                r = sd_bus_message_enter_container(m, 'a', "(ss)");
+                                if (r < 0)
+                                        return bus_log_parse_error(r);
+
+                                while ((r = sd_bus_message_read(m, "(ss)", &partition, &mount_options)) > 0)
+                                        if (!strextend_with_separator(&str, ":", partition, mount_options))
+                                                return log_oom();
+                                if (r < 0)
+                                        return bus_log_parse_error(r);
+
+                                if (!strextend_with_separator(&paths, " ", str))
+                                        return log_oom();
+
+                                r = sd_bus_message_exit_container(m);
+                                if (r < 0)
+                                        return bus_log_parse_error(r);
+
+                                r = sd_bus_message_exit_container(m);
+                                if (r < 0)
+                                        return bus_log_parse_error(r);
+                        }
 
                         r = sd_bus_message_exit_container(m);
                         if (r < 0)
@@ -1710,6 +1763,24 @@ static int print_property(const char *name, const char *expected_value, sd_bus_m
                                                         family, colon1, protocol, colon2, port_min,
                                                         (uint16_t) (port_min + nr_ports - 1));
                         }
+                        if (r < 0)
+                                return bus_log_parse_error(r);
+
+                        r = sd_bus_message_exit_container(m);
+                        if (r < 0)
+                                return bus_log_parse_error(r);
+
+                        return 1;
+                } else if (STR_IN_SET(name, "StateDirectorySymlink", "RuntimeDirectorySymlink", "CacheDirectorySymlink", "LogsDirectorySymlink")) {
+                        const char *a, *p;
+                        uint64_t symlink_flags;
+
+                        r = sd_bus_message_enter_container(m, SD_BUS_TYPE_ARRAY, "(sst)");
+                        if (r < 0)
+                                return bus_log_parse_error(r);
+
+                        while ((r = sd_bus_message_read(m, "(sst)", &a, &p, &symlink_flags)) > 0)
+                                bus_print_property_valuef(name, expected_value, flags, "%s:%s", a, p);
                         if (r < 0)
                                 return bus_log_parse_error(r);
 
@@ -1888,7 +1959,7 @@ static int show_one(
 
                 if (show_mode == SYSTEMCTL_SHOW_STATUS)
                         return EXIT_PROGRAM_OR_SERVICES_STATUS_UNKNOWN;
-                else if (show_mode == SYSTEMCTL_SHOW_HELP)
+                if (show_mode == SYSTEMCTL_SHOW_HELP)
                         return -ENOENT;
         }
 
@@ -1965,7 +2036,7 @@ static int show_all(
         if (r < 0)
                 return r;
 
-        (void) pager_open(arg_pager_flags);
+        pager_open(arg_pager_flags);
 
         c = (unsigned) r;
 
@@ -1981,7 +2052,7 @@ static int show_all(
                 r = show_one(bus, p, u->id, SYSTEMCTL_SHOW_STATUS, new_line, ellipsized);
                 if (r < 0)
                         return r;
-                else if (r > 0 && ret == 0)
+                if (r > 0 && ret == 0)
                         ret = r;
         }
 
@@ -1991,8 +2062,10 @@ static int show_all(
 static int show_system_status(sd_bus *bus) {
         _cleanup_(sd_bus_error_free) sd_bus_error error = SD_BUS_ERROR_NULL;
         _cleanup_(machine_info_clear) struct machine_info mi = {};
+        static const char prefix[] = "           ";
         _cleanup_free_ char *hn = NULL;
         const char *on, *off;
+        unsigned c;
         int r;
 
         hn = gethostname_malloc();
@@ -2022,7 +2095,7 @@ static int show_system_status(sd_bus *bus) {
                 off = ansi_normal();
         }
 
-        printf("%s%s%s %s\n", on, special_glyph(SPECIAL_GLYPH_BLACK_CIRCLE), off, arg_host ? arg_host : hn);
+        printf("%s%s%s %s\n", on, special_glyph(SPECIAL_GLYPH_BLACK_CIRCLE), off, arg_host ?: hn);
 
         printf("    State: %s%s%s\n",
                on, strna(mi.state), off);
@@ -2034,21 +2107,16 @@ static int show_system_status(sd_bus *bus) {
                FORMAT_TIMESTAMP_STYLE(mi.timestamp, arg_timestamp_style),
                FORMAT_TIMESTAMP_RELATIVE(mi.timestamp));
 
-        printf("   CGroup: %s\n", mi.control_group ?: "/");
-        if (IN_SET(arg_transport,
-                   BUS_TRANSPORT_LOCAL,
-                   BUS_TRANSPORT_MACHINE)) {
-                static const char prefix[] = "           ";
-                unsigned c;
+        printf("   CGroup: %s\n", empty_to_root(mi.control_group));
 
-                c = columns();
-                if (c > sizeof(prefix) - 1)
-                        c -= sizeof(prefix) - 1;
-                else
-                        c = 0;
+        c = LESS_BY(columns(), strlen(prefix));
 
+        r = unit_show_processes(bus, SPECIAL_ROOT_SLICE, mi.control_group, prefix, c, get_output_flags(), &error);
+        if (r == -EBADR && arg_transport == BUS_TRANSPORT_LOCAL) /* Compatibility for really old systemd versions */
                 show_cgroup(SYSTEMD_CGROUP_CONTROLLER, strempty(mi.control_group), prefix, c, get_output_flags());
-        }
+        else if (r < 0)
+                log_warning_errno(r, "Failed to dump process list for '%s', ignoring: %s",
+                                  arg_host ?: hn, bus_error_message(&error, r));
 
         return 0;
 }
@@ -2074,7 +2142,7 @@ int show(int argc, char *argv[], void *userdata) {
         if (r < 0)
                 return r;
 
-        (void) pager_open(arg_pager_flags);
+        pager_open(arg_pager_flags);
 
         /* If no argument is specified inspect the manager itself */
         if (show_mode == SYSTEMCTL_SHOW_PROPERTIES && argc <= 1)
@@ -2121,7 +2189,7 @@ int show(int argc, char *argv[], void *userdata) {
                         r = show_one(bus, path, unit, show_mode, &new_line, &ellipsized);
                         if (r < 0)
                                 return r;
-                        else if (r > 0 && ret == 0)
+                        if (r > 0 && ret == 0)
                                 ret = r;
                 }
 

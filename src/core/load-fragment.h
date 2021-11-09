@@ -4,6 +4,10 @@
 #include "conf-parser.h"
 #include "unit.h"
 
+/* These functions are declared in the header to make them accessible to unit tests. */
+bool contains_instance_specifier_superset(const char *s);
+int unit_is_likely_recursive_template_dependency(Unit *u, const char *name, const char *format);
+
 /* Config-parsing helpers relevant only for sources under src/core/ */
 int parse_crash_chvt(const char *value, int *data);
 int parse_confirm_spawn(const char *value, char **console);
@@ -33,6 +37,7 @@ CONFIG_PARSER_PROTOTYPE(config_parse_service_timeout);
 CONFIG_PARSER_PROTOTYPE(config_parse_service_timeout_abort);
 CONFIG_PARSER_PROTOTYPE(config_parse_service_timeout_failure_mode);
 CONFIG_PARSER_PROTOTYPE(config_parse_service_type);
+CONFIG_PARSER_PROTOTYPE(config_parse_service_exit_type);
 CONFIG_PARSER_PROTOTYPE(config_parse_service_restart);
 CONFIG_PARSER_PROTOTYPE(config_parse_socket_bindtodevice);
 CONFIG_PARSER_PROTOTYPE(config_parse_exec_output);
@@ -143,6 +148,8 @@ CONFIG_PARSER_PROTOTYPE(config_parse_extension_images);
 CONFIG_PARSER_PROTOTYPE(config_parse_bpf_foreign_program);
 CONFIG_PARSER_PROTOTYPE(config_parse_cgroup_socket_bind);
 CONFIG_PARSER_PROTOTYPE(config_parse_restrict_network_interfaces);
+CONFIG_PARSER_PROTOTYPE(config_parse_watchdog_sec);
+CONFIG_PARSER_PROTOTYPE(config_parse_tty_size);
 
 /* gperf prototypes */
 const struct ConfigPerfItem* load_fragment_gperf_lookup(const char *key, GPERF_LEN_TYPE length);

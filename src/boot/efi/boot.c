@@ -8,7 +8,7 @@
 #include "devicetree.h"
 #include "disk.h"
 #include "drivers.h"
-#include "efi-loader-features.h"
+#include "efivars-fundamental.h"
 #include "graphics.h"
 #include "linux.h"
 #include "measure.h"
@@ -17,15 +17,25 @@
 #include "secure-boot.h"
 #include "shim.h"
 #include "util.h"
+#include "xbootldr.h"
 
-#ifndef EFI_OS_INDICATIONS_BOOT_TO_FW_UI
-#define EFI_OS_INDICATIONS_BOOT_TO_FW_UI 0x0000000000000001ULL
+#ifndef GNU_EFI_USE_MS_ABI
+        /* We do not use uefi_call_wrapper() in systemd-boot. As such, we rely on the
+         * compiler to do the calling convention conversion for us. This is check is
+         * to make sure the -DGNU_EFI_USE_MS_ABI was passed to the comiler. */
+        #error systemd-boot requires compilation with GNU_EFI_USE_MS_ABI defined.
 #endif
 
 #define TEXT_ATTR_SWAP(c) EFI_TEXT_ATTR(((c) & 0b11110000) >> 4, (c) & 0b1111)
 
 /* magic string to find in the binary image */
-static const char _used_ _section_(".sdmagic") magic[] = "#### LoaderInfo: systemd-boot " GIT_VERSION " ####";
+_used_ _section_(".sdmagic") static const char magic[] = "#### LoaderInfo: systemd-boot " GIT_VERSION " ####";
+
+/* Makes systemd-boot available from \EFI\Linux\ for testing purposes. */
+_used_ _section_(".osrel") static const char osrel[] =
+        "ID=systemd-boot\n"
+        "VERSION=\"" GIT_VERSION "\"\n"
+        "NAME=\"systemd-boot " GIT_VERSION "\"\n";
 
 enum loader_type {
         LOADER_UNDEFINED,
@@ -45,7 +55,7 @@ typedef struct {
         CHAR16 *devicetree;
         CHAR16 *options;
         CHAR16 key;
-        EFI_STATUS (*call)(VOID);
+        EFI_STATUS (*call)(void);
         BOOLEAN no_autoselect;
         BOOLEAN non_unique;
         UINTN tries_done;
@@ -60,22 +70,38 @@ typedef struct {
         UINTN entry_count;
         INTN idx_default;
         INTN idx_default_efivar;
-        UINTN timeout_sec;
-        UINTN timeout_sec_config;
-        INTN timeout_sec_efivar;
-        CHAR16 *entry_default_pattern;
+        UINT32 timeout_sec; /* Actual timeout used (efi_main() override > efivar > config). */
+        UINT32 timeout_sec_config;
+        UINT32 timeout_sec_efivar;
+        CHAR16 *entry_default_config;
+        CHAR16 *entry_default_efivar;
         CHAR16 *entry_oneshot;
+        CHAR16 *entry_saved;
         CHAR16 *options_edit;
         BOOLEAN editor;
         BOOLEAN auto_entries;
         BOOLEAN auto_firmware;
         BOOLEAN force_menu;
+        BOOLEAN use_saved_entry;
+        BOOLEAN use_saved_entry_efivar;
         INT64 console_mode;
         INT64 console_mode_efivar;
         RandomSeedMode random_seed_mode;
 } Config;
 
-static VOID cursor_left(UINTN *cursor, UINTN *first) {
+/* These values have been chosen so that the transitions the user sees could
+ * employ unsigned over-/underflow like this:
+ * efivar unset ↔ force menu ↔ no timeout/skip menu ↔ 1 s ↔ 2 s ↔ … */
+enum {
+        TIMEOUT_MIN         = 1,
+        TIMEOUT_MAX         = UINT32_MAX - 2U,
+        TIMEOUT_UNSET       = UINT32_MAX - 1U,
+        TIMEOUT_MENU_FORCE  = UINT32_MAX,
+        TIMEOUT_MENU_HIDDEN = 0,
+        TIMEOUT_TYPE_MAX    = UINT32_MAX,
+};
+
+static void cursor_left(UINTN *cursor, UINTN *first) {
         assert(cursor);
         assert(first);
 
@@ -85,7 +111,7 @@ static VOID cursor_left(UINTN *cursor, UINTN *first) {
                 (*first)--;
 }
 
-static VOID cursor_right(
+static void cursor_right(
                 UINTN *cursor,
                 UINTN *first,
                 UINTN x_max,
@@ -114,11 +140,17 @@ static BOOLEAN line_edit(
 
         if (!line_in)
                 line_in = L"";
+
         size = StrLen(line_in) + 1024;
         line = AllocatePool(size * sizeof(CHAR16));
+        if (!line)
+                return FALSE;
+
         StrCpy(line, line_in);
         len = StrLen(line);
         print = AllocatePool((x_max+1) * sizeof(CHAR16));
+        if (!print)
+                return FALSE;
 
         first = 0;
         cursor = 0;
@@ -366,12 +398,54 @@ static UINTN entry_lookup_key(Config *config, UINTN start, CHAR16 key) {
         return -1;
 }
 
-static VOID print_status(Config *config, CHAR16 *loaded_image_path) {
+static CHAR16 *update_timeout_efivar(UINT32 *t, BOOLEAN inc) {
+        assert(t);
+
+        switch (*t) {
+        case TIMEOUT_MAX:
+                *t = inc ? TIMEOUT_MAX : (*t - 1);
+                break;
+        case TIMEOUT_UNSET:
+                *t = inc ? TIMEOUT_MENU_FORCE : TIMEOUT_UNSET;
+                break;
+        case TIMEOUT_MENU_FORCE:
+                *t = inc ? TIMEOUT_MENU_HIDDEN : TIMEOUT_UNSET;
+                break;
+        case TIMEOUT_MENU_HIDDEN:
+                *t = inc ? TIMEOUT_MIN : TIMEOUT_MENU_FORCE;
+                break;
+        default:
+                *t += inc ? 1 : -1;
+        }
+
+        switch (*t) {
+        case TIMEOUT_UNSET:
+                return StrDuplicate(L"Menu timeout defined by configuration file.");
+        case TIMEOUT_MENU_FORCE:
+                return StrDuplicate(L"Timeout disabled, menu will always be shown.");
+        case TIMEOUT_MENU_HIDDEN:
+                return StrDuplicate(L"Menu disabled. Hold down key at bootup to show menu.");
+        default:
+                return PoolPrint(L"Menu timeout set to %u s.", *t);
+        }
+}
+
+static void ps_string(const CHAR16 *fmt, const void *value) {
+        assert(fmt);
+        if (value)
+                Print(fmt, value);
+}
+
+static void ps_bool(const CHAR16 *fmt, BOOLEAN value) {
+        assert(fmt);
+        Print(fmt, yes_no(value));
+}
+
+static void print_status(Config *config, CHAR16 *loaded_image_path) {
         UINT64 key;
-        UINTN timeout;
-        BOOLEAN modevar;
-        _cleanup_freepool_ CHAR16 *partstr = NULL, *defaultstr = NULL;
         UINTN x_max, y_max;
+        SecureBootMode secure;
+        _cleanup_freepool_ CHAR16 *device_part_uuid = NULL;
 
         assert(config);
         assert(loaded_image_path);
@@ -379,124 +453,122 @@ static VOID print_status(Config *config, CHAR16 *loaded_image_path) {
         clear_screen(COLOR_NORMAL);
         console_query_mode(&x_max, &y_max);
 
-        Print(L"systemd-boot version:   " GIT_VERSION "\n");
-        Print(L"architecture:           " EFI_MACHINE_TYPE_NAME "\n");
-        Print(L"loaded image:           %s\n", loaded_image_path);
-        Print(L"UEFI specification:     %d.%02d\n", ST->Hdr.Revision >> 16, ST->Hdr.Revision & 0xffff);
-        Print(L"firmware vendor:        %s\n", ST->FirmwareVendor);
-        Print(L"firmware version:       %d.%02d\n", ST->FirmwareRevision >> 16, ST->FirmwareRevision & 0xffff);
-        Print(L"console mode:           %d/%ld\n", ST->ConOut->Mode->Mode, ST->ConOut->Mode->MaxMode - 1LL);
-        Print(L"console size:           %d x %d\n", x_max, y_max);
-        Print(L"SecureBoot:             %s\n", yes_no(secure_boot_enabled()));
+        secure = secure_boot_mode();
+        (void) efivar_get(LOADER_GUID, L"LoaderDevicePartUUID", &device_part_uuid);
 
-        if (efivar_get_boolean_u8(EFI_GLOBAL_GUID, L"SetupMode", &modevar) == EFI_SUCCESS)
-                Print(L"SetupMode:              %s\n", modevar ? L"setup" : L"user");
+        /* We employ some unusual indentation here for readability. */
 
-        if (shim_loaded())
-                Print(L"Shim:                   present\n");
+        ps_string(L"  systemd-boot version: %a\n",      GIT_VERSION);
+        ps_string(L"          loaded image: %s\n",      loaded_image_path);
+        ps_string(L" loader partition UUID: %s\n",      device_part_uuid);
+        ps_string(L"          architecture: %a\n",      EFI_MACHINE_TYPE_NAME);
+            Print(L"    UEFI specification: %u.%02u\n", ST->Hdr.Revision >> 16, ST->Hdr.Revision & 0xffff);
+        ps_string(L"       firmware vendor: %s\n",      ST->FirmwareVendor);
+            Print(L"      firmware version: %u.%02u\n", ST->FirmwareRevision >> 16, ST->FirmwareRevision & 0xffff);
+            Print(L"        OS indications: %lu\n",     get_os_indications_supported());
+            Print(L"           secure boot: %s (%s)\n", yes_no(IN_SET(secure, SECURE_BOOT_USER, SECURE_BOOT_DEPLOYED)), secure_boot_mode_to_string(secure));
+          ps_bool(L"                  shim: %s\n",      shim_loaded());
+            Print(L"          console mode: %d/%d (%lu x %lu)\n", ST->ConOut->Mode->Mode, ST->ConOut->Mode->MaxMode - 1LL, x_max, y_max);
 
-        Print(L"OsIndicationsSupported: %d\n", get_os_indications_supported());
+        Print(L"\n--- Press any key to continue. ---\n\n");
+        console_key_read(&key, UINT64_MAX);
 
-        Print(L"\n--- press key ---\n\n");
-        console_key_read(&key, 0);
-
-        Print(L"timeout:                %u\n", config->timeout_sec);
-        if (config->timeout_sec_efivar >= 0)
-                Print(L"timeout (EFI var):      %d\n", config->timeout_sec_efivar);
-        Print(L"timeout (config):       %u\n", config->timeout_sec_config);
-        if (config->entry_default_pattern)
-                Print(L"default pattern:        '%s'\n", config->entry_default_pattern);
-        Print(L"editor:                 %s\n", yes_no(config->editor));
-        Print(L"auto-entries:           %s\n", yes_no(config->auto_entries));
-        Print(L"auto-firmware:          %s\n", yes_no(config->auto_firmware));
-
-        switch (config->random_seed_mode) {
-        case RANDOM_SEED_OFF:
-                Print(L"random-seed-mode:       off\n");
-                break;
-        case RANDOM_SEED_WITH_SYSTEM_TOKEN:
-                Print(L"random-seed-mode:       with-system-token\n");
-                break;
-        case RANDOM_SEED_ALWAYS:
-                Print(L"random-seed-mode:       always\n");
-                break;
+        switch (config->timeout_sec_config) {
+        case TIMEOUT_UNSET:
+            break;
+        case TIMEOUT_MENU_FORCE:
+            Print(L"               timeout: menu-force\n"); break;
+        case TIMEOUT_MENU_HIDDEN:
+            Print(L"               timeout: menu-hidden\n"); break;
         default:
-                ;
+            Print(L"               timeout: %lu s\n", config->timeout_sec_config);
         }
 
-        Print(L"\n");
+        switch (config->timeout_sec_efivar) {
+        case TIMEOUT_UNSET:
+            break;
+        case TIMEOUT_MENU_FORCE:
+            Print(L"     timeout (EFI var): menu-force\n"); break;
+        case TIMEOUT_MENU_HIDDEN:
+            Print(L"     timeout (EFI var): menu-hidden\n"); break;
+        default:
+            Print(L"     timeout (EFI var): %lu s\n", config->timeout_sec_efivar);
+        }
 
-        Print(L"config entry count:     %d\n", config->entry_count);
-        Print(L"entry selected idx:     %d\n", config->idx_default);
-        if (config->idx_default_efivar >= 0)
-                Print(L"entry EFI var idx:      %d\n", config->idx_default_efivar);
-        Print(L"\n");
+        ps_string(L"               default: %s\n", config->entry_default_config);
+        ps_string(L"     default (EFI var): %s\n", config->entry_default_efivar);
+        ps_string(L"    default (one-shot): %s\n", config->entry_oneshot);
+        ps_string(L"           saved entry: %s\n", config->entry_saved);
+          ps_bool(L"                editor: %s\n", config->editor);
+          ps_bool(L"          auto-entries: %s\n", config->auto_entries);
+          ps_bool(L"         auto-firmware: %s\n", config->auto_firmware);
+        ps_string(L"      random-seed-mode: %s\n", random_seed_modes_table[config->random_seed_mode]);
 
-        if (efivar_get_uint_string(LOADER_GUID, L"LoaderConfigTimeout", &timeout) == EFI_SUCCESS)
-                Print(L"LoaderConfigTimeout:    %u\n", timeout);
+        switch (config->console_mode) {
+        case CONSOLE_MODE_AUTO:
+            Print(L"          console-mode: %s\n", L"auto"); break;
+        case CONSOLE_MODE_KEEP:
+            Print(L"          console-mode: %s\n", L"keep"); break;
+        case CONSOLE_MODE_FIRMWARE_MAX:
+            Print(L"          console-mode: %s\n", L"max"); break;
+        default:
+            Print(L"          console-mode: %ld\n", config->console_mode); break;
+        }
 
-        if (config->entry_oneshot)
-                Print(L"LoaderEntryOneShot:     %s\n", config->entry_oneshot);
-        if (efivar_get(LOADER_GUID, L"LoaderDevicePartUUID", &partstr) == EFI_SUCCESS)
-                Print(L"LoaderDevicePartUUID:   %s\n", partstr);
-        if (efivar_get(LOADER_GUID, L"LoaderEntryDefault", &defaultstr) == EFI_SUCCESS)
-                Print(L"LoaderEntryDefault:     %s\n", defaultstr);
+        /* EFI var console mode is always a concrete value or unset. */
+        if (config->console_mode_efivar != CONSOLE_MODE_KEEP)
+            Print(L"console-mode (EFI var): %ld\n", config->console_mode_efivar);
 
-        Print(L"\n--- press key ---\n\n");
-        console_key_read(&key, 0);
+        Print(L"\n--- Press any key to continue. ---\n\n");
+        console_key_read(&key, UINT64_MAX);
 
         for (UINTN i = 0; i < config->entry_count; i++) {
-                ConfigEntry *entry;
+                ConfigEntry *entry = config->entries[i];
 
-                if (key == KEYPRESS(0, SCAN_ESC, 0) || key == KEYPRESS(0, 0, 'q'))
-                        break;
+                    Print(L"  config entry: %lu/%lu\n", i + 1, config->entry_count);
+                ps_string(L"            id: %s\n", entry->id);
+                ps_string(L"         title: %s\n", entry->title);
+                ps_string(L"    title show: %s\n", streq_ptr(entry->title, entry->title_show) ? NULL : entry->title_show);
+                ps_string(L"       version: %s\n", entry->version);
+                ps_string(L"    machine-id: %s\n", entry->machine_id);
+                if (entry->device)
+                    Print(L"        device: %D\n", DevicePathFromHandle(entry->device));
+                ps_string(L"        loader: %s\n", entry->loader);
+                ps_string(L"    devicetree: %s\n", entry->devicetree);
+                ps_string(L"       options: %s\n", entry->options);
+                  ps_bool(L"   auto-select: %s\n", !entry->no_autoselect);
+                  ps_bool(L" internal call: %s\n", !!entry->call);
 
-                entry = config->entries[i];
-                Print(L"config entry:           %d/%d\n", i+1, config->entry_count);
-                if (entry->id)
-                        Print(L"id                      '%s'\n", entry->id);
-                Print(L"title show              '%s'\n", entry->title_show);
-                if (entry->title)
-                        Print(L"title                   '%s'\n", entry->title);
-                if (entry->version)
-                        Print(L"version                 '%s'\n", entry->version);
-                if (entry->machine_id)
-                        Print(L"machine-id              '%s'\n", entry->machine_id);
-                if (entry->device) {
-                        EFI_DEVICE_PATH *device_path;
-
-                        device_path = DevicePathFromHandle(entry->device);
-                        if (device_path) {
-                                _cleanup_freepool_ CHAR16 *str = NULL;
-
-                                str = DevicePathToStr(device_path);
-                                Print(L"device handle           '%s'\n", str);
-                        }
+                  ps_bool(L"counting boots: %s\n", entry->tries_left != UINTN_MAX);
+                if (entry->tries_left != UINTN_MAX) {
+                    Print(L"         tries: %lu done, %lu left\n", entry->tries_done, entry->tries_left);
+                    Print(L"  current path: %s\\%s\n",  entry->path, entry->current_name);
+                    Print(L"     next path: %s\\%s\n",  entry->path, entry->next_name);
                 }
-                if (entry->loader)
-                        Print(L"loader                  '%s'\n", entry->loader);
-                if (entry->devicetree)
-                        Print(L"devicetree              '%s'\n", entry->devicetree);
-                if (entry->options)
-                        Print(L"options                 '%s'\n", entry->options);
-                Print(L"auto-select             %s\n", yes_no(!entry->no_autoselect));
-                if (entry->call)
-                        Print(L"internal call           yes\n");
 
-                if (entry->tries_left != UINTN_MAX)
-                        Print(L"counting boots          yes\n"
-                               "tries done              %u\n"
-                               "tries left              %u\n"
-                               "current path            %s\\%s\n"
-                               "next path               %s\\%s\n",
-                              entry->tries_done,
-                              entry->tries_left,
-                              entry->path, entry->current_name,
-                              entry->path, entry->next_name);
-
-                Print(L"\n--- press key ---\n\n");
-                console_key_read(&key, 0);
+                Print(L"\n--- Press any key to continue, ESC or q to quit. ---\n\n");
+                console_key_read(&key, UINT64_MAX);
+                if (key == KEYPRESS(0, SCAN_ESC, 0) || key == KEYPRESS(0, 0, 'q') || key == KEYPRESS(0, 0, 'Q'))
+                        break;
         }
+}
+
+static EFI_STATUS reboot_into_firmware(void) {
+        UINT64 osind = 0;
+        EFI_STATUS err;
+
+        if (!FLAGS_SET(get_os_indications_supported(), EFI_OS_INDICATIONS_BOOT_TO_FW_UI))
+                return log_error_status_stall(EFI_UNSUPPORTED, L"Reboot to firmware interface not supported.");
+
+        (void) efivar_get_uint64_le(EFI_GLOBAL_GUID, L"OsIndications", &osind);
+        osind |= EFI_OS_INDICATIONS_BOOT_TO_FW_UI;
+
+        err = efivar_set_uint64_le(EFI_GLOBAL_GUID, L"OsIndications", osind, EFI_VARIABLE_NON_VOLATILE);
+        if (EFI_ERROR(err))
+                return log_error_status_stall(err, L"Error setting OsIndications: %r", err);
+
+        err = RT->ResetSystem(EfiResetCold, EFI_SUCCESS, 0, NULL);
+        return log_error_status_stall(err, L"Error calling ResetSystem: %r", err);
 }
 
 static BOOLEAN menu_run(
@@ -517,16 +589,18 @@ static BOOLEAN menu_run(
         BOOLEAN refresh = TRUE, highlight = FALSE;
         UINTN x_start = 0, y_start = 0, y_status = 0;
         UINTN x_max, y_max;
-        CHAR16 **lines = NULL;
+        _cleanup_(strv_freep) CHAR16 **lines = NULL;
         _cleanup_freepool_ CHAR16 *clearline = NULL, *status = NULL;
-        UINTN timeout_remain = config->timeout_sec;
+        UINT32 timeout_efivar_saved = config->timeout_sec_efivar;
+        UINT32 timeout_remain = config->timeout_sec == TIMEOUT_MENU_FORCE ? 0 : config->timeout_sec;
         INT16 idx;
-        BOOLEAN exit = FALSE, run = TRUE;
+        BOOLEAN exit = FALSE, run = TRUE, firmware_setup = FALSE;
         INT64 console_mode_initial = ST->ConOut->Mode->Mode, console_mode_efivar_saved = config->console_mode_efivar;
+        INTN default_efivar_saved = config->idx_default_efivar;
 
         graphics_mode(FALSE);
-        uefi_call_wrapper(ST->ConIn->Reset, 2, ST->ConIn, FALSE);
-        uefi_call_wrapper(ST->ConOut->EnableCursor, 2, ST->ConOut, FALSE);
+        ST->ConIn->Reset(ST->ConIn, FALSE);
+        ST->ConOut->EnableCursor(ST->ConOut, FALSE);
 
         /* draw a single character to make ClearScreen work on some firmware */
         Print(L" ");
@@ -576,19 +650,25 @@ static BOOLEAN menu_run(
                         /* Put status line after the entry list, but give it some breathing room. */
                         y_status = MIN(y_start + MIN(visible_max, config->entry_count) + 4, y_max - 1);
 
-                        if (lines) {
-                                for (UINTN i = 0; i < config->entry_count; i++)
-                                        FreePool(lines[i]);
-                                FreePool(lines);
-                                FreePool(clearline);
-                        }
+                        lines = strv_free(lines);
+                        clearline = mfree(clearline);
 
                         /* menu entries title lines */
-                        lines = AllocatePool(sizeof(CHAR16 *) * config->entry_count);
+                        lines = AllocatePool((config->entry_count + 1) * sizeof(CHAR16 *));
+                        if (!lines) {
+                                log_oom();
+                                return FALSE;
+                        }
+
                         for (UINTN i = 0; i < config->entry_count; i++) {
                                 UINTN j, padding;
 
                                 lines[i] = AllocatePool(((line_width + 1) * sizeof(CHAR16)));
+                                if (!lines[i]) {
+                                        log_oom();
+                                        return FALSE;
+                                }
+
                                 padding = (line_width - MIN(StrLen(config->entries[i]->title_show), line_width)) / 2;
 
                                 for (j = 0; j < padding; j++)
@@ -601,8 +681,14 @@ static BOOLEAN menu_run(
                                         lines[i][j] = ' ';
                                 lines[i][line_width] = '\0';
                         }
+                        lines[config->entry_count] = NULL;
 
                         clearline = AllocatePool((x_max+1) * sizeof(CHAR16));
+                        if (!clearline) {
+                                log_oom();
+                                return FALSE;
+                        }
+
                         for (UINTN i = 0; i < x_max; i++)
                                 clearline[i] = ' ';
                         clearline[x_max] = 0;
@@ -640,7 +726,7 @@ static BOOLEAN menu_run(
 
                 if (timeout_remain > 0) {
                         FreePool(status);
-                        status = PoolPrint(L"Boot in %d s.", timeout_remain);
+                        status = PoolPrint(L"Boot in %u s.", timeout_remain);
                 }
 
                 /* print status at last line of screen */
@@ -655,11 +741,11 @@ static BOOLEAN menu_run(
                         else
                                 x = 0;
                         print_at(0, y_status, COLOR_NORMAL, clearline + (x_max - x));
-                        uefi_call_wrapper(ST->ConOut->OutputString, 2, ST->ConOut, status);
-                        uefi_call_wrapper(ST->ConOut->OutputString, 2, ST->ConOut, clearline+1 + x + len);
+                        ST->ConOut->OutputString(ST->ConOut, status);
+                        ST->ConOut->OutputString(ST->ConOut, clearline + 1 + x + len);
                 }
 
-                err = console_key_read(&key, timeout_remain > 0 ? 1000 * 1000 : 0);
+                err = console_key_read(&key, timeout_remain > 0 ? 1000 * 1000 : UINT64_MAX);
                 if (err == EFI_TIMEOUT) {
                         timeout_remain--;
                         if (timeout_remain == 0) {
@@ -680,6 +766,13 @@ static BOOLEAN menu_run(
                 }
 
                 idx_highlight_prev = idx_highlight;
+
+                if (firmware_setup) {
+                        firmware_setup = FALSE;
+                        if (key == KEYPRESS(0, 0, CHAR_CARRIAGE_RETURN))
+                                reboot_into_firmware();
+                        continue;
+                }
 
                 switch (key) {
                 case KEYPRESS(0, SCAN_UP, 0):
@@ -737,7 +830,7 @@ static BOOLEAN menu_run(
                 case KEYPRESS(0, 0, 'h'):
                 case KEYPRESS(0, 0, 'H'):
                 case KEYPRESS(0, 0, '?'):
-                        /* This must stay below 80 characters! Q/v/Ctrl+l deliberately not advertised. */
+                        /* This must stay below 80 characters! Q/v/Ctrl+l/f deliberately not advertised. */
                         status = StrDuplicate(L"(d)efault (t/T)timeout (e)dit (r/R)resolution (p)rint (h)elp");
                         break;
 
@@ -749,63 +842,31 @@ static BOOLEAN menu_run(
                 case KEYPRESS(0, 0, 'd'):
                 case KEYPRESS(0, 0, 'D'):
                         if (config->idx_default_efivar != (INTN)idx_highlight) {
-                                /* store the selected entry in a persistent EFI variable */
-                                efivar_set(
-                                        LOADER_GUID,
-                                        L"LoaderEntryDefault",
-                                        config->entries[idx_highlight]->id,
-                                        EFI_VARIABLE_NON_VOLATILE);
+                                FreePool(config->entry_default_efivar);
+                                config->entry_default_efivar = StrDuplicate(config->entries[idx_highlight]->id);
+                                if (!config->entry_default_efivar) {
+                                        log_oom();
+                                        return FALSE;
+                                }
                                 config->idx_default_efivar = idx_highlight;
                                 status = StrDuplicate(L"Default boot entry selected.");
                         } else {
-                                /* clear the default entry EFI variable */
-                                efivar_set(LOADER_GUID, L"LoaderEntryDefault", NULL, EFI_VARIABLE_NON_VOLATILE);
+                                config->entry_default_efivar = mfree(config->entry_default_efivar);
                                 config->idx_default_efivar = -1;
                                 status = StrDuplicate(L"Default boot entry cleared.");
                         }
+                        config->use_saved_entry_efivar = FALSE;
                         refresh = TRUE;
                         break;
 
                 case KEYPRESS(0, 0, '-'):
                 case KEYPRESS(0, 0, 'T'):
-                        if (config->timeout_sec_efivar > 0) {
-                                config->timeout_sec_efivar--;
-                                efivar_set_uint_string(
-                                        LOADER_GUID,
-                                        L"LoaderConfigTimeout",
-                                        config->timeout_sec_efivar,
-                                        EFI_VARIABLE_NON_VOLATILE);
-                                if (config->timeout_sec_efivar > 0)
-                                        status = PoolPrint(L"Menu timeout set to %d s.", config->timeout_sec_efivar);
-                                else
-                                        status = StrDuplicate(L"Menu disabled. Hold down key at bootup to show menu.");
-                        } else if (config->timeout_sec_efivar <= 0){
-                                config->timeout_sec_efivar = -1;
-                                efivar_set(
-                                        LOADER_GUID, L"LoaderConfigTimeout", NULL, EFI_VARIABLE_NON_VOLATILE);
-                                if (config->timeout_sec_config > 0)
-                                        status = PoolPrint(L"Menu timeout of %d s is defined by configuration file.",
-                                                           config->timeout_sec_config);
-                                else
-                                        status = StrDuplicate(L"Menu disabled. Hold down key at bootup to show menu.");
-                        }
+                        status = update_timeout_efivar(&config->timeout_sec_efivar, FALSE);
                         break;
 
                 case KEYPRESS(0, 0, '+'):
                 case KEYPRESS(0, 0, 't'):
-                        if (config->timeout_sec_efivar == -1 && config->timeout_sec_config == 0)
-                                config->timeout_sec_efivar++;
-                        config->timeout_sec_efivar++;
-                        efivar_set_uint_string(
-                                LOADER_GUID,
-                                L"LoaderConfigTimeout",
-                                config->timeout_sec_efivar,
-                                EFI_VARIABLE_NON_VOLATILE);
-                        if (config->timeout_sec_efivar > 0)
-                                status = PoolPrint(L"Menu timeout set to %d s.",
-                                                   config->timeout_sec_efivar);
-                        else
-                                status = StrDuplicate(L"Menu disabled. Hold down key at bootup to show menu.");
+                        status = update_timeout_efivar(&config->timeout_sec_efivar, TRUE);
                         break;
 
                 case KEYPRESS(0, 0, 'e'):
@@ -863,6 +924,20 @@ static BOOLEAN menu_run(
                         new_mode = TRUE;
                         break;
 
+                case KEYPRESS(0, 0, 'f'):
+                case KEYPRESS(0, 0, 'F'):
+                case KEYPRESS(0, SCAN_F2, 0):     /* Most vendors. */
+                case KEYPRESS(0, SCAN_F10, 0):    /* HP and Lenovo. */
+                case KEYPRESS(0, SCAN_DELETE, 0): /* Same as F2. */
+                case KEYPRESS(0, SCAN_ESC, 0):    /* HP. */
+                        if (FLAGS_SET(get_os_indications_supported(), EFI_OS_INDICATIONS_BOOT_TO_FW_UI)) {
+                                firmware_setup = TRUE;
+                                /* Let's make sure the user really wants to do this. */
+                                status = PoolPrint(L"Press Enter to reboot into firmware interface.");
+                        } else
+                                status = PoolPrint(L"Reboot into firmware interface not supported.");
+                        break;
+
                 default:
                         /* jump with a hotkey directly to a matching entry */
                         idx = entry_lookup_key(config, idx_highlight+1, KEYCHAR(key));
@@ -888,9 +963,11 @@ static BOOLEAN menu_run(
 
         *chosen_entry = config->entries[idx_highlight];
 
-        /* The user is likely to cycle through several modes before
-         * deciding to keep one. Therefore, we update the EFI var after
-         * we left the menu to reduce nvram writes. */
+        /* Update EFI vars after we left the menu to reduce NVRAM writes. */
+
+        if (default_efivar_saved != config->idx_default_efivar)
+                efivar_set(LOADER_GUID, L"LoaderEntryDefault", config->entry_default_efivar, EFI_VARIABLE_NON_VOLATILE);
+
         if (console_mode_efivar_saved != config->console_mode_efivar) {
                 if (config->console_mode_efivar == CONSOLE_MODE_KEEP)
                         efivar_set(LOADER_GUID, L"LoaderConfigConsoleMode", NULL, EFI_VARIABLE_NON_VOLATILE);
@@ -899,15 +976,19 @@ static BOOLEAN menu_run(
                                                config->console_mode_efivar, EFI_VARIABLE_NON_VOLATILE);
         }
 
-        for (UINTN i = 0; i < config->entry_count; i++)
-                FreePool(lines[i]);
-        FreePool(lines);
+        if (timeout_efivar_saved != config->timeout_sec_efivar) {
+                if (config->timeout_sec_efivar == TIMEOUT_UNSET)
+                        efivar_set(LOADER_GUID, L"LoaderConfigTimeout", NULL, EFI_VARIABLE_NON_VOLATILE);
+                else
+                        efivar_set_uint_string(LOADER_GUID, L"LoaderConfigTimeout",
+                                               config->timeout_sec_efivar, EFI_VARIABLE_NON_VOLATILE);
+        }
 
         clear_screen(COLOR_NORMAL);
         return run;
 }
 
-static VOID config_add_entry(Config *config, ConfigEntry *entry) {
+static void config_add_entry(Config *config, ConfigEntry *entry) {
         assert(config);
         assert(entry);
 
@@ -915,13 +996,13 @@ static VOID config_add_entry(Config *config, ConfigEntry *entry) {
                 UINTN i = config->entry_count + 16;
                 config->entries = ReallocatePool(
                                 config->entries,
-                                sizeof(VOID *) * config->entry_count,
-                                sizeof(VOID *) * i);
+                                sizeof(void *) * config->entry_count,
+                                sizeof(void *) * i);
         }
         config->entries[config->entry_count++] = entry;
 }
 
-static VOID config_entry_free(ConfigEntry *entry) {
+static void config_entry_free(ConfigEntry *entry) {
         if (!entry)
                 return;
 
@@ -937,6 +1018,10 @@ static VOID config_entry_free(ConfigEntry *entry) {
         FreePool(entry->current_name);
         FreePool(entry->next_name);
         FreePool(entry);
+}
+
+static inline void config_entry_freep(ConfigEntry **entry) {
+        config_entry_free(*entry);
 }
 
 static CHAR8 *line_get_key_value(
@@ -1012,7 +1097,7 @@ skip:
         return line;
 }
 
-static VOID config_defaults_load_from_file(Config *config, CHAR8 *content) {
+static void config_defaults_load_from_file(Config *config, CHAR8 *content) {
         CHAR8 *line;
         UINTN pos = 0;
         CHAR8 *key, *value;
@@ -1023,18 +1108,27 @@ static VOID config_defaults_load_from_file(Config *config, CHAR8 *content) {
 
         while ((line = line_get_key_value(content, (CHAR8 *)" \t", &pos, &key, &value))) {
                 if (strcmpa((CHAR8 *)"timeout", key) == 0) {
-                        _cleanup_freepool_ CHAR16 *s = NULL;
+                        if (strcmpa((CHAR8*) "menu-force", value) == 0)
+                                config->timeout_sec_config = TIMEOUT_MENU_FORCE;
+                        else if (strcmpa((CHAR8*) "menu-hidden", value) == 0)
+                                config->timeout_sec_config = TIMEOUT_MENU_HIDDEN;
+                        else {
+                                _cleanup_freepool_ CHAR16 *s = NULL;
 
-                        s = stra_to_str(value);
-                        config->timeout_sec_config = Atoi(s);
+                                s = stra_to_str(value);
+                                config->timeout_sec_config = MIN(Atoi(s), TIMEOUT_TYPE_MAX);
+                        }
                         config->timeout_sec = config->timeout_sec_config;
                         continue;
                 }
 
                 if (strcmpa((CHAR8 *)"default", key) == 0) {
-                        FreePool(config->entry_default_pattern);
-                        config->entry_default_pattern = stra_to_str(value);
-                        StrLwr(config->entry_default_pattern);
+                        if (value[0] == '@' && strcmpa((CHAR8 *)"@saved", value) != 0) {
+                                log_error_stall(L"Unsupported special entry identifier: %a", value);
+                                continue;
+                        }
+                        FreePool(config->entry_default_config);
+                        config->entry_default_config = stra_to_str(value);
                         continue;
                 }
 
@@ -1098,7 +1192,7 @@ static VOID config_defaults_load_from_file(Config *config, CHAR8 *content) {
         }
 }
 
-static VOID config_entry_parse_tries(
+static void config_entry_parse_tries(
                 ConfigEntry *entry,
                 const CHAR16 *path,
                 const CHAR16 *file,
@@ -1217,16 +1311,15 @@ good:
         entry->next_name = PoolPrint(L"%s+%u-%u%s", prefix, next_left, next_done, suffix ?: L"");
 }
 
-static VOID config_entry_bump_counters(
+static void config_entry_bump_counters(
                 ConfigEntry *entry,
                 EFI_FILE_HANDLE root_dir) {
 
         _cleanup_freepool_ CHAR16* old_path = NULL, *new_path = NULL;
         _cleanup_(FileHandleClosep) EFI_FILE_HANDLE handle = NULL;
-        static const EFI_GUID EfiFileInfoGuid = EFI_FILE_INFO_ID;
         _cleanup_freepool_ EFI_FILE_INFO *file_info = NULL;
         UINTN file_info_size;
-        EFI_STATUS r;
+        EFI_STATUS err;
 
         assert(entry);
         assert(root_dir);
@@ -1239,24 +1332,24 @@ static VOID config_entry_bump_counters(
 
         old_path = PoolPrint(L"%s\\%s", entry->path, entry->current_name);
 
-        r = uefi_call_wrapper(root_dir->Open, 5, root_dir, &handle, old_path, EFI_FILE_MODE_READ|EFI_FILE_MODE_WRITE, 0ULL);
-        if (EFI_ERROR(r))
+        err = root_dir->Open(root_dir, &handle, old_path, EFI_FILE_MODE_READ|EFI_FILE_MODE_WRITE, 0ULL);
+        if (EFI_ERROR(err))
                 return;
 
-        r = get_file_info_harder(handle, &file_info, &file_info_size);
-        if (EFI_ERROR(r))
+        err = get_file_info_harder(handle, &file_info, &file_info_size);
+        if (EFI_ERROR(err))
                 return;
 
         /* And rename the file */
         StrCpy(file_info->FileName, entry->next_name);
-        r = uefi_call_wrapper(handle->SetInfo, 4, handle, (EFI_GUID*) &EfiFileInfoGuid, file_info_size, file_info);
-        if (EFI_ERROR(r)) {
-                log_error_stall(L"Failed to rename '%s' to '%s', ignoring: %r", old_path, entry->next_name, r);
+        err = handle->SetInfo(handle, &GenericFileInfo, file_info_size, file_info);
+        if (EFI_ERROR(err)) {
+                log_error_stall(L"Failed to rename '%s' to '%s', ignoring: %r", old_path, entry->next_name, err);
                 return;
         }
 
         /* Flush everything to disk, just in case… */
-        (void) uefi_call_wrapper(handle->Flush, 1, handle);
+        (void) handle->Flush(handle);
 
         /* Let's tell the OS that we renamed this file, so that it knows what to rename to the counter-less name on
          * success */
@@ -1270,7 +1363,7 @@ static VOID config_entry_bump_counters(
         }
 }
 
-static VOID config_entry_add_from_file(
+static void config_entry_add_from_file(
                 Config *config,
                 EFI_HANDLE *device,
                 EFI_FILE *root_dir,
@@ -1279,7 +1372,7 @@ static VOID config_entry_add_from_file(
                 CHAR8 *content,
                 const CHAR16 *loaded_image_path) {
 
-        ConfigEntry *entry;
+        _cleanup_(config_entry_freep) ConfigEntry *entry = NULL;
         CHAR8 *line;
         UINTN pos = 0;
         CHAR8 *key, *value;
@@ -1293,7 +1386,6 @@ static VOID config_entry_add_from_file(
         assert(path);
         assert(file);
         assert(content);
-        assert(loaded_image_path);
 
         entry = AllocatePool(sizeof(ConfigEntry));
 
@@ -1390,18 +1482,14 @@ static VOID config_entry_add_from_file(
                 }
         }
 
-        if (entry->type == LOADER_UNDEFINED) {
-                config_entry_free(entry);
+        if (entry->type == LOADER_UNDEFINED)
                 return;
-        }
 
         /* check existence */
-        err = uefi_call_wrapper(root_dir->Open, 5, root_dir, &handle, entry->loader, EFI_FILE_MODE_READ, 0ULL);
-        if (EFI_ERROR(err)) {
-                config_entry_free(entry);
+        err = root_dir->Open(root_dir, &handle, entry->loader, EFI_FILE_MODE_READ, 0ULL);
+        if (EFI_ERROR(err))
                 return;
-        }
-        uefi_call_wrapper(handle->Close, 1, handle);
+        handle->Close(handle);
 
         /* add initrd= to options */
         if (entry->type == LOADER_LINUX && initrd) {
@@ -1422,9 +1510,10 @@ static VOID config_entry_add_from_file(
         config_add_entry(config, entry);
 
         config_entry_parse_tries(entry, path, file, L".conf");
+        TAKE_PTR(entry);
 }
 
-static VOID config_load_defaults(Config *config, EFI_FILE *root_dir) {
+static void config_load_defaults(Config *config, EFI_FILE *root_dir) {
         _cleanup_freepool_ CHAR8 *content = NULL;
         UINTN value;
         EFI_STATUS err;
@@ -1439,6 +1528,8 @@ static VOID config_load_defaults(Config *config, EFI_FILE *root_dir) {
                 .idx_default_efivar = -1,
                 .console_mode = CONSOLE_MODE_KEEP,
                 .console_mode_efivar = CONSOLE_MODE_KEEP,
+                .timeout_sec_config = TIMEOUT_UNSET,
+                .timeout_sec_efivar = TIMEOUT_UNSET,
         };
 
         err = file_read(root_dir, L"\\loader\\loader.conf", 0, 0, &content, NULL);
@@ -1447,26 +1538,37 @@ static VOID config_load_defaults(Config *config, EFI_FILE *root_dir) {
 
         err = efivar_get_uint_string(LOADER_GUID, L"LoaderConfigTimeout", &value);
         if (!EFI_ERROR(err)) {
-                config->timeout_sec_efivar = value > INTN_MAX ? INTN_MAX : value;
-                config->timeout_sec = value;
-        } else
-                config->timeout_sec_efivar = -1;
+                config->timeout_sec_efivar = MIN(value, TIMEOUT_TYPE_MAX);
+                config->timeout_sec = config->timeout_sec_efivar;
+        }
 
         err = efivar_get_uint_string(LOADER_GUID, L"LoaderConfigTimeoutOneShot", &value);
         if (!EFI_ERROR(err)) {
                 /* Unset variable now, after all it's "one shot". */
                 (void) efivar_set(LOADER_GUID, L"LoaderConfigTimeoutOneShot", NULL, EFI_VARIABLE_NON_VOLATILE);
 
-                config->timeout_sec = value;
+                config->timeout_sec = MIN(value, TIMEOUT_TYPE_MAX);
                 config->force_menu = TRUE; /* force the menu when this is set */
         }
 
         err = efivar_get_uint_string(LOADER_GUID, L"LoaderConfigConsoleMode", &value);
         if (!EFI_ERROR(err))
                 config->console_mode_efivar = value;
+
+        err = efivar_get(LOADER_GUID, L"LoaderEntryOneShot", &config->entry_oneshot);
+        if (!EFI_ERROR(err))
+                /* Unset variable now, after all it's "one shot". */
+                (void) efivar_set(LOADER_GUID, L"LoaderEntryOneShot", NULL, EFI_VARIABLE_NON_VOLATILE);
+
+        (void) efivar_get(LOADER_GUID, L"LoaderEntryDefault", &config->entry_default_efivar);
+
+        config->use_saved_entry = streq_ptr(config->entry_default_config, L"@saved");
+        config->use_saved_entry_efivar = streq_ptr(config->entry_default_efivar, L"@saved");
+        if (config->use_saved_entry || config->use_saved_entry_efivar)
+                (void) efivar_get(LOADER_GUID, L"LoaderEntryLastBooted", &config->entry_saved);
 }
 
-static VOID config_load_entries(
+static void config_load_entries(
                 Config *config,
                 EFI_HANDLE *device,
                 EFI_FILE *root_dir,
@@ -1480,7 +1582,6 @@ static VOID config_load_entries(
         assert(config);
         assert(device);
         assert(root_dir);
-        assert(loaded_image_path);
 
         err = open_directory(root_dir, L"\\loader\\entries", &entries_dir);
         if (EFI_ERROR(err))
@@ -1495,7 +1596,7 @@ static VOID config_load_entries(
 
                 if (f->FileName[0] == '.')
                         continue;
-                if (f->Attribute & EFI_FILE_DIRECTORY)
+                if (FLAGS_SET(f->Attribute, EFI_FILE_DIRECTORY))
                         continue;
 
                 if (!endswith_no_case(f->FileName, L".conf"))
@@ -1544,75 +1645,51 @@ static INTN config_entry_compare(const ConfigEntry *a, const ConfigEntry *b) {
         return 0;
 }
 
-static VOID config_sort_entries(Config *config) {
+static void config_sort_entries(Config *config) {
         assert(config);
 
         sort_pointer_array((void**) config->entries, config->entry_count, (compare_pointer_func_t) config_entry_compare);
 }
 
-static INTN config_entry_find(Config *config, CHAR16 *id) {
+static INTN config_entry_find(Config *config, CHAR16 *needle) {
         assert(config);
-        assert(id);
+
+        if (!needle)
+                return -1;
 
         for (UINTN i = 0; i < config->entry_count; i++)
-                if (StrCmp(config->entries[i]->id, id) == 0)
+                if (MetaiMatch(config->entries[i]->id, needle))
                         return (INTN) i;
 
         return -1;
 }
 
-static VOID config_default_entry_select(Config *config) {
-        _cleanup_freepool_ CHAR16 *entry_default = NULL;
-        EFI_STATUS err;
+static void config_default_entry_select(Config *config) {
         INTN i;
 
         assert(config);
 
-        /*
-         * The EFI variable to specify a boot entry for the next, and only the
-         * next reboot. The variable is always cleared directly after it is read.
-         */
-        err = efivar_get(LOADER_GUID, L"LoaderEntryOneShot", &config->entry_oneshot);
-        if (!EFI_ERROR(err)) {
-                efivar_set(LOADER_GUID, L"LoaderEntryOneShot", NULL, EFI_VARIABLE_NON_VOLATILE);
-
-                i = config_entry_find(config, config->entry_oneshot);
-                if (i >= 0) {
-                        config->idx_default = i;
-                        return;
-                }
-        }
-
-        /*
-         * The EFI variable to select the default boot entry overrides the
-         * configured pattern. The variable can be set and cleared by pressing
-         * the 'd' key in the loader selection menu.
-         */
-        err = efivar_get(LOADER_GUID, L"LoaderEntryDefault", &entry_default);
-        if (!EFI_ERROR(err)) {
-                i = config_entry_find(config, entry_default);
-                if (i >= 0) {
-                        config->idx_default = i;
-                        config->idx_default_efivar = i;
-                        return;
-                }
-        }
-
-        if (config->entry_count == 0)
+        i = config_entry_find(config, config->entry_oneshot);
+        if (i >= 0) {
+                config->idx_default = i;
                 return;
+        }
 
-        /*
-         * Match the pattern from the end of the list to the start, find last
-         * entry (largest number) matching the given pattern.
-         */
-        if (config->entry_default_pattern) {
-                i = config->entry_count;
-                while (i--) {
-                        if (MetaiMatch(config->entries[i]->id, config->entry_default_pattern)) {
-                                config->idx_default = i;
-                                return;
-                        }
-                }
+        i = config_entry_find(config, config->use_saved_entry_efivar ? config->entry_saved : config->entry_default_efivar);
+        if (i >= 0) {
+                config->idx_default = i;
+                config->idx_default_efivar = i;
+                return;
+        }
+
+        if (config->use_saved_entry)
+                /* No need to do the same thing twice. */
+                i = config->use_saved_entry_efivar ? -1 : config_entry_find(config, config->entry_saved);
+        else
+                i = config_entry_find(config, config->entry_default_config);
+        if (i >= 0) {
+                config->idx_default = i;
+                return;
         }
 
         /* select the last suitable entry */
@@ -1650,7 +1727,7 @@ static BOOLEAN find_nonunique(ConfigEntry **entries, UINTN entry_count) {
 }
 
 /* generate a unique title, avoiding non-distinguishable menu entries */
-static VOID config_title_generate(Config *config) {
+static void config_title_generate(Config *config) {
         assert(config);
 
         /* set title */
@@ -1721,7 +1798,7 @@ static BOOLEAN config_entry_add_call(
                 Config *config,
                 const CHAR16 *id,
                 const CHAR16 *title,
-                EFI_STATUS (*call)(VOID)) {
+                EFI_STATUS (*call)(void)) {
 
         ConfigEntry *entry;
 
@@ -1843,10 +1920,10 @@ static BOOLEAN config_entry_add_loader_auto(
         }
 
         /* check existence */
-        err = uefi_call_wrapper(root_dir->Open, 5, root_dir, &handle, (CHAR16*) loader, EFI_FILE_MODE_READ, 0ULL);
+        err = root_dir->Open(root_dir, &handle, (CHAR16*) loader, EFI_FILE_MODE_READ, 0ULL);
         if (EFI_ERROR(err))
                 return FALSE;
-        uefi_call_wrapper(handle->Close, 1, handle);
+        handle->Close(handle);
 
         entry = config_entry_add_loader(config, device, LOADER_UNDEFINED, id, key, title, loader, NULL);
         if (!entry)
@@ -1858,7 +1935,7 @@ static BOOLEAN config_entry_add_loader_auto(
         return TRUE;
 }
 
-static VOID config_entry_add_osx(Config *config) {
+static void config_entry_add_osx(Config *config) {
         EFI_STATUS err;
         UINTN handle_count = 0;
         _cleanup_freepool_ EFI_HANDLE *handles = NULL;
@@ -1879,14 +1956,14 @@ static VOID config_entry_add_osx(Config *config) {
                                 continue;
                         found = config_entry_add_loader_auto(config, handles[i], root, NULL, L"auto-osx", 'a', L"macOS",
                                                              L"\\System\\Library\\CoreServices\\boot.efi");
-                        uefi_call_wrapper(root->Close, 1, root);
+                        root->Close(root);
                         if (found)
                                 break;
                 }
         }
 }
 
-static VOID config_entry_add_windows(Config *config, EFI_HANDLE *device, EFI_FILE *root_dir) {
+static void config_entry_add_windows(Config *config, EFI_HANDLE *device, EFI_FILE *root_dir) {
         _cleanup_freepool_ CHAR8 *bcd = NULL;
         const CHAR16 *title = NULL;
         EFI_STATUS err;
@@ -1935,7 +2012,7 @@ static VOID config_entry_add_windows(Config *config, EFI_HANDLE *device, EFI_FIL
                                      L"\\EFI\\Microsoft\\Boot\\bootmgfw.efi");
 }
 
-static VOID config_entry_add_linux(
+static void config_entry_add_linux(
                 Config *config,
                 EFI_HANDLE *device,
                 EFI_FILE *root_dir) {
@@ -1955,16 +2032,23 @@ static VOID config_entry_add_linux(
                 return;
 
         for (;;) {
+                enum {
+                        SECTION_CMDLINE,
+                        SECTION_OSREL,
+                        _SECTION_MAX,
+                };
+
+                static const CHAR8* const sections[_SECTION_MAX + 1] = {
+                        [SECTION_CMDLINE] = (const CHAR8 *) ".cmdline",
+                        [SECTION_OSREL]   = (const CHAR8 *) ".osrel",
+                        NULL,
+                };
+
                 _cleanup_freepool_ CHAR16 *os_name_pretty = NULL, *os_name = NULL, *os_id = NULL,
                         *os_version = NULL, *os_version_id = NULL, *os_build_id = NULL, *os_image_version = NULL;
                 _cleanup_freepool_ CHAR8 *content = NULL;
-                const CHAR8 *sections[] = {
-                        (CHAR8 *)".osrel",
-                        (CHAR8 *)".cmdline",
-                        NULL
-                };
-                UINTN offs[ELEMENTSOF(sections)-1] = {};
-                UINTN szs[ELEMENTSOF(sections)-1] = {};
+                UINTN offs[_SECTION_MAX] = {};
+                UINTN szs[_SECTION_MAX] = {};
                 CHAR8 *line;
                 UINTN pos = 0;
                 CHAR8 *key, *value;
@@ -1975,7 +2059,7 @@ static VOID config_entry_add_linux(
 
                 if (f->FileName[0] == '.')
                         continue;
-                if (f->Attribute & EFI_FILE_DIRECTORY)
+                if (FLAGS_SET(f->Attribute, EFI_FILE_DIRECTORY))
                         continue;
                 if (!endswith_no_case(f->FileName, L".efi"))
                         continue;
@@ -1983,11 +2067,11 @@ static VOID config_entry_add_linux(
                         continue;
 
                 /* look for .osrel and .cmdline sections in the .efi binary */
-                err = pe_file_locate_sections(linux_dir, f->FileName, sections, offs, szs);
-                if (EFI_ERROR(err))
+                err = pe_file_locate_sections(linux_dir, f->FileName, (const CHAR8**) sections, offs, szs);
+                if (EFI_ERROR(err) || szs[SECTION_OSREL] == 0)
                         continue;
 
-                err = file_read(linux_dir, f->FileName, offs[0], szs[0], &content, NULL);
+                err = file_read(linux_dir, f->FileName, offs[SECTION_OSREL], szs[SECTION_OSREL], &content, NULL);
                 if (EFI_ERROR(err))
                         continue;
 
@@ -2051,227 +2135,41 @@ static VOID config_entry_add_linux(
                                         path,
                                         os_image_version ?: (os_version ?: (os_version_id ? : os_build_id)));
 
+                        config_entry_parse_tries(entry, L"\\EFI\\Linux", f->FileName, L".efi");
+
+                        if (szs[SECTION_CMDLINE] == 0)
+                                continue;
+
                         FreePool(content);
                         content = NULL;
 
                         /* read the embedded cmdline file */
-                        err = file_read(linux_dir, f->FileName, offs[1], szs[1], &content, NULL);
+                        err = file_read(linux_dir, f->FileName, offs[SECTION_CMDLINE], szs[SECTION_CMDLINE], &content, NULL);
                         if (!EFI_ERROR(err)) {
 
                                 /* chomp the newline */
-                                if (content[szs[1]-1] == '\n')
-                                        content[szs[1]-1] = '\0';
+                                if (content[szs[SECTION_CMDLINE] - 1] == '\n')
+                                        content[szs[SECTION_CMDLINE] - 1] = '\0';
 
                                 entry->options = stra_to_str(content);
                         }
-
-                        config_entry_parse_tries(entry, L"\\EFI\\Linux", f->FileName, L".efi");
                 }
         }
 }
 
-#define XBOOTLDR_GUID \
-        &(const EFI_GUID) { 0xbc13c2ff, 0x59e6, 0x4262, { 0xa3, 0x52, 0xb2, 0x75, 0xfd, 0x6f, 0x71, 0x72 } }
-
-static EFI_DEVICE_PATH *path_parent(EFI_DEVICE_PATH *path, EFI_DEVICE_PATH *node) {
-        EFI_DEVICE_PATH *parent;
-        UINTN len;
-
-        assert(path);
-        assert(node);
-
-        len = (UINT8*) NextDevicePathNode(node) - (UINT8*) path;
-        parent = (EFI_DEVICE_PATH*) AllocatePool(len + sizeof(EFI_DEVICE_PATH));
-        CopyMem(parent, path, len);
-        CopyMem((UINT8*) parent + len, EndDevicePath, sizeof(EFI_DEVICE_PATH));
-
-        return parent;
-}
-
-static VOID config_load_xbootldr(
+static void config_load_xbootldr(
                 Config *config,
                 EFI_HANDLE *device) {
 
-        EFI_DEVICE_PATH *partition_path, *disk_path, *copy;
-        UINT32 found_partition_number = UINT32_MAX;
-        UINT64 found_partition_start = UINT64_MAX;
-        UINT64 found_partition_size = UINT64_MAX;
-        UINT8 found_partition_signature[16] = {};
         EFI_HANDLE new_device;
         EFI_FILE *root_dir;
-        EFI_STATUS r;
+        EFI_STATUS err;
 
         assert(config);
         assert(device);
 
-        partition_path = DevicePathFromHandle(device);
-        if (!partition_path)
-                return;
-
-        for (EFI_DEVICE_PATH *node = partition_path; !IsDevicePathEnd(node); node = NextDevicePathNode(node)) {
-                EFI_HANDLE disk_handle;
-                EFI_BLOCK_IO *block_io;
-                EFI_DEVICE_PATH *p;
-
-                /* First, Let's look for the SCSI/SATA/USB/… device path node, i.e. one above the media
-                 * devices */
-                if (DevicePathType(node) != MESSAGING_DEVICE_PATH)
-                        continue;
-
-                /* Determine the device path one level up */
-                disk_path = path_parent(partition_path, node);
-                p = disk_path;
-                r = uefi_call_wrapper(BS->LocateDevicePath, 3, &BlockIoProtocol, &p, &disk_handle);
-                if (EFI_ERROR(r))
-                        continue;
-
-                r = uefi_call_wrapper(BS->HandleProtocol, 3, disk_handle, &BlockIoProtocol, (VOID **)&block_io);
-                if (EFI_ERROR(r))
-                        continue;
-
-                /* Filter out some block devices early. (We only care about block devices that aren't
-                 * partitions themselves — we look for GPT partition tables to parse after all —, and only
-                 * those which contain a medium and have at least 2 blocks.) */
-                if (block_io->Media->LogicalPartition ||
-                    !block_io->Media->MediaPresent ||
-                    block_io->Media->LastBlock <= 1)
-                        continue;
-
-                /* Try both copies of the GPT header, in case one is corrupted */
-                for (UINTN nr = 0; nr < 2; nr++) {
-                        _cleanup_freepool_ EFI_PARTITION_ENTRY* entries = NULL;
-                        union {
-                                EFI_PARTITION_TABLE_HEADER gpt_header;
-                                uint8_t space[((sizeof(EFI_PARTITION_TABLE_HEADER) + 511) / 512) * 512];
-                        } gpt_header_buffer;
-                        EFI_PARTITION_TABLE_HEADER *h = &gpt_header_buffer.gpt_header;
-                        UINT64 where;
-                        UINTN sz;
-                        UINT32 crc32, crc32_saved;
-
-                        if (nr == 0)
-                                /* Read the first copy at LBA 1 */
-                                where = 1;
-                        else
-                                /* Read the second copy at the very last LBA of this block device */
-                                where = block_io->Media->LastBlock;
-
-                        /* Read the GPT header */
-                        r = uefi_call_wrapper(block_io->ReadBlocks, 5,
-                                              block_io,
-                                              block_io->Media->MediaId,
-                                              where,
-                                              sizeof(gpt_header_buffer), &gpt_header_buffer);
-                        if (EFI_ERROR(r))
-                                continue;
-
-                        /* Some superficial validation of the GPT header */
-                        if(CompareMem(&h->Header.Signature, "EFI PART", sizeof(h->Header.Signature) != 0))
-                                continue;
-
-                        if (h->Header.HeaderSize < 92 ||
-                            h->Header.HeaderSize > 512)
-                                continue;
-
-                        if (h->Header.Revision != 0x00010000U)
-                                continue;
-
-                        /* Calculate CRC check */
-                        crc32_saved = h->Header.CRC32;
-                        h->Header.CRC32 = 0;
-                        r = BS->CalculateCrc32(&gpt_header_buffer, h->Header.HeaderSize, &crc32);
-                        h->Header.CRC32 = crc32_saved;
-                        if (EFI_ERROR(r) || crc32 != crc32_saved)
-                                continue;
-
-                        if (h->MyLBA != where)
-                                continue;
-
-                        if (h->SizeOfPartitionEntry < sizeof(EFI_PARTITION_ENTRY))
-                                continue;
-
-                        if (h->NumberOfPartitionEntries <= 0 ||
-                            h->NumberOfPartitionEntries > 1024)
-                                continue;
-
-                        if (h->SizeOfPartitionEntry > UINTN_MAX / h->NumberOfPartitionEntries) /* overflow check */
-                                continue;
-
-                        /* Now load the GPT entry table */
-                        sz = ALIGN_TO((UINTN) h->SizeOfPartitionEntry * (UINTN) h->NumberOfPartitionEntries, 512);
-                        entries = AllocatePool(sz);
-
-                        r = uefi_call_wrapper(block_io->ReadBlocks, 5,
-                                              block_io,
-                                              block_io->Media->MediaId,
-                                              h->PartitionEntryLBA,
-                                              sz, entries);
-                        if (EFI_ERROR(r))
-                                continue;
-
-                        /* Calculate CRC of entries array, too */
-                        r = BS->CalculateCrc32(&entries, sz, &crc32);
-                        if (EFI_ERROR(r) || crc32 != h->PartitionEntryArrayCRC32)
-                                continue;
-
-                        for (UINTN i = 0; i < h->NumberOfPartitionEntries; i++) {
-                                EFI_PARTITION_ENTRY *entry;
-
-                                entry = (EFI_PARTITION_ENTRY*) ((UINT8*) entries + h->SizeOfPartitionEntry * i);
-
-                                if (CompareMem(&entry->PartitionTypeGUID, XBOOTLDR_GUID, 16) == 0) {
-                                        UINT64 end;
-
-                                        /* Let's use memcpy(), in case the structs are not aligned (they really should be though) */
-                                        CopyMem(&found_partition_start, &entry->StartingLBA, sizeof(found_partition_start));
-                                        CopyMem(&end, &entry->EndingLBA, sizeof(end));
-
-                                        if (end < found_partition_start) /* Bogus? */
-                                                continue;
-
-                                        found_partition_size = end - found_partition_start + 1;
-                                        CopyMem(found_partition_signature, &entry->UniquePartitionGUID, sizeof(found_partition_signature));
-
-                                        found_partition_number = i + 1;
-                                        goto found;
-                                }
-                        }
-
-                        break; /* This GPT was fully valid, but we didn't find what we are looking for. This
-                                * means there's no reason to check the second copy of the GPT header */
-                }
-        }
-
-        return; /* Not found */
-
-found:
-        copy = DuplicateDevicePath(partition_path);
-
-        /* Patch in the data we found */
-        for (EFI_DEVICE_PATH *node = copy; !IsDevicePathEnd(node); node = NextDevicePathNode(node)) {
-                HARDDRIVE_DEVICE_PATH *hd;
-
-                if (DevicePathType(node) != MEDIA_DEVICE_PATH)
-                        continue;
-
-                if (DevicePathSubType(node) != MEDIA_HARDDRIVE_DP)
-                        continue;
-
-                hd = (HARDDRIVE_DEVICE_PATH*) node;
-                hd->PartitionNumber = found_partition_number;
-                hd->PartitionStart = found_partition_start;
-                hd->PartitionSize = found_partition_size;
-                CopyMem(hd->Signature, found_partition_signature, sizeof(hd->Signature));
-                hd->MBRType = MBR_TYPE_EFI_PARTITION_TABLE_HEADER;
-                hd->SignatureType = SIGNATURE_TYPE_GUID;
-        }
-
-        r = uefi_call_wrapper(BS->LocateDevicePath, 3, &BlockIoProtocol, &copy, &new_device);
-        if (EFI_ERROR(r))
-                return;
-
-        root_dir = LibOpenRoot(new_device);
-        if (!root_dir)
+        err = xbootldr_open(device, &new_device, &root_dir);
+        if (EFI_ERROR(err))
                 return;
 
         config_entry_add_linux(config, new_device, root_dir);
@@ -2297,7 +2195,7 @@ static EFI_STATUS image_start(
         if (!path)
                 return log_error_status_stall(EFI_INVALID_PARAMETER, L"Error getting device path.");
 
-        err = uefi_call_wrapper(BS->LoadImage, 6, FALSE, parent_image, path, NULL, 0, &image);
+        err = BS->LoadImage(FALSE, parent_image, path, NULL, 0, &image);
         if (EFI_ERROR(err))
                 return log_error_status_stall(err, L"Error loading %s: %r", entry->loader, err);
 
@@ -2316,8 +2214,8 @@ static EFI_STATUS image_start(
         if (options) {
                 EFI_LOADED_IMAGE *loaded_image;
 
-                err = uefi_call_wrapper(BS->OpenProtocol, 6, image, &LoadedImageProtocol, (VOID **)&loaded_image,
-                                        parent_image, NULL, EFI_OPEN_PROTOCOL_GET_PROTOCOL);
+                err = BS->OpenProtocol(image, &LoadedImageProtocol, (void **)&loaded_image,
+                                       parent_image, NULL, EFI_OPEN_PROTOCOL_GET_PROTOCOL);
                 if (EFI_ERROR(err)) {
                         log_error_stall(L"Error getting LoadedImageProtocol handle: %r", err);
                         goto out_unload;
@@ -2326,45 +2224,27 @@ static EFI_STATUS image_start(
                 loaded_image->LoadOptionsSize = StrSize(loaded_image->LoadOptions);
 
                 /* Try to log any options to the TPM, especially to catch manually edited options */
-                (VOID) tpm_log_load_options(options);
+                (void) tpm_log_load_options(options);
         }
 
         efivar_set_time_usec(LOADER_GUID, L"LoaderTimeExecUSec", 0);
-        err = uefi_call_wrapper(BS->StartImage, 3, image, NULL, NULL);
+        err = BS->StartImage(image, NULL, NULL);
 out_unload:
-        uefi_call_wrapper(BS->UnloadImage, 1, image);
+        BS->UnloadImage(image);
         return err;
 }
 
-static EFI_STATUS reboot_into_firmware(VOID) {
-        UINT64 old, new;
-        EFI_STATUS err;
-
-        new = EFI_OS_INDICATIONS_BOOT_TO_FW_UI;
-
-        err = efivar_get_uint64_le(EFI_GLOBAL_GUID, L"OsIndications", &old);
-        if (!EFI_ERROR(err))
-                new |= old;
-
-        err = efivar_set_uint64_le(EFI_GLOBAL_GUID, L"OsIndications", new, EFI_VARIABLE_NON_VOLATILE);
-        if (EFI_ERROR(err))
-                return err;
-
-        err = uefi_call_wrapper(RT->ResetSystem, 4, EfiResetCold, EFI_SUCCESS, 0, NULL);
-        return log_error_status_stall(err, L"Error calling ResetSystem: %r", err);
-}
-
-static VOID config_free(Config *config) {
+static void config_free(Config *config) {
         assert(config);
         for (UINTN i = 0; i < config->entry_count; i++)
                 config_entry_free(config->entries[i]);
         FreePool(config->entries);
-        FreePool(config->entry_default_pattern);
+        FreePool(config->entry_default_config);
         FreePool(config->options_edit);
         FreePool(config->entry_oneshot);
 }
 
-static VOID config_write_entries_to_variable(Config *config) {
+static void config_write_entries_to_variable(Config *config) {
         _cleanup_freepool_ CHAR8 *buffer = NULL;
         UINTN sz = 0;
         CHAR8 *p;
@@ -2391,7 +2271,30 @@ static VOID config_write_entries_to_variable(Config *config) {
         (void) efivar_set_raw(LOADER_GUID, L"LoaderEntries", buffer, sz, 0);
 }
 
-static VOID export_variables(
+static void save_selected_entry(const Config *config, const ConfigEntry *entry) {
+        assert(config);
+        assert(entry);
+        assert(!entry->call);
+
+        /* Always export the selected boot entry to the system in a volatile var. */
+        (void) efivar_set(LOADER_GUID, L"LoaderEntrySelected", entry->id, 0);
+
+        /* Do not save or delete if this was a oneshot boot. */
+        if (streq_ptr(config->entry_oneshot, entry->id))
+                return;
+
+        if (config->use_saved_entry_efivar || (!config->entry_default_efivar && config->use_saved_entry)) {
+                /* Avoid unnecessary NVRAM writes. */
+                if (streq_ptr(config->entry_saved, entry->id))
+                        return;
+
+                (void) efivar_set(LOADER_GUID, L"LoaderEntryLastBooted", entry->id, EFI_VARIABLE_NON_VOLATILE);
+        } else
+                /* Delete the non-volatile var if not needed. */
+                (void) efivar_set(LOADER_GUID, L"LoaderEntryLastBooted", NULL, EFI_VARIABLE_NON_VOLATILE);
+}
+
+static void export_variables(
                 EFI_LOADED_IMAGE *loaded_image,
                 const CHAR16 *loaded_image_path,
                 UINT64 init_usec) {
@@ -2432,7 +2335,7 @@ static VOID export_variables(
                 efivar_set(LOADER_GUID, L"LoaderDevicePartUUID", uuid, 0);
 }
 
-static VOID config_load_all_entries(
+static void config_load_all_entries(
                 Config *config,
                 EFI_LOADED_IMAGE *loaded_image,
                 const CHAR16 *loaded_image_path,
@@ -2465,7 +2368,7 @@ static VOID config_load_all_entries(
         config_entry_add_loader_auto(config, loaded_image->DeviceHandle, root_dir, loaded_image_path,
                                      L"auto-efi-default", '\0', L"EFI Default Loader", NULL);
 
-        if (config->auto_firmware && (get_os_indications_supported() & EFI_OS_INDICATIONS_BOOT_TO_FW_UI))
+        if (config->auto_firmware && FLAGS_SET(get_os_indications_supported(), EFI_OS_INDICATIONS_BOOT_TO_FW_UI))
                 config_entry_add_call(config,
                                       L"auto-reboot-to-firmware-setup",
                                       L"Reboot Into Firmware Interface",
@@ -2475,20 +2378,18 @@ static VOID config_load_all_entries(
 EFI_STATUS efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *sys_table) {
         _cleanup_freepool_ EFI_LOADED_IMAGE *loaded_image = NULL;
         _cleanup_(FileHandleClosep) EFI_FILE *root_dir = NULL;
+        _cleanup_(config_free) Config config = {};
         CHAR16 *loaded_image_path;
         EFI_STATUS err;
-        Config config;
         UINT64 init_usec;
         BOOLEAN menu = FALSE;
 
         InitializeLib(image, sys_table);
         init_usec = time_usec();
 
-        err = uefi_call_wrapper(
-                        BS->OpenProtocol, 6,
-                        image,
+        err = BS->OpenProtocol(image,
                         &LoadedImageProtocol,
-                        (VOID **)&loaded_image,
+                        (void **)&loaded_image,
                         image,
                         NULL,
                         EFI_OPEN_PROTOCOL_GET_PROTOCOL);
@@ -2511,7 +2412,7 @@ EFI_STATUS efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *sys_table) {
                         return log_error_status_stall(err, L"Error installing security policy: %r", err);
         }
 
-        (VOID) load_drivers(image, loaded_image, root_dir);
+        (void) load_drivers(image, loaded_image, root_dir);
 
         config_load_all_entries(&config, loaded_image, loaded_image_path, root_dir);
 
@@ -2560,7 +2461,6 @@ EFI_STATUS efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *sys_table) {
                 entry = config.entries[config.idx_default];
                 if (menu) {
                         efivar_set_time_usec(LOADER_GUID, L"LoaderTimeMenuUSec", 0);
-                        uefi_call_wrapper(BS->SetWatchdogTimer, 4, 0, 0x10000, 0, NULL);
                         if (!menu_run(&config, &entry, loaded_image_path))
                                 break;
                 }
@@ -2572,14 +2472,11 @@ EFI_STATUS efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *sys_table) {
                 }
 
                 config_entry_bump_counters(entry, root_dir);
-
-                /* Export the selected boot entry to the system */
-                (VOID) efivar_set(LOADER_GUID, L"LoaderEntrySelected", entry->id, 0);
+                save_selected_entry(&config, entry);
 
                 /* Optionally, read a random seed off the ESP and pass it to the OS */
-                (VOID) process_random_seed(root_dir, config.random_seed_mode);
+                (void) process_random_seed(root_dir, config.random_seed_mode);
 
-                uefi_call_wrapper(BS->SetWatchdogTimer, 4, 5 * 60, 0x10000, 0, NULL);
                 err = image_start(root_dir, image, &config, entry);
                 if (EFI_ERROR(err)) {
                         graphics_mode(FALSE);
@@ -2592,7 +2489,6 @@ EFI_STATUS efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *sys_table) {
         }
         err = EFI_SUCCESS;
 out:
-        config_free(&config);
-        uefi_call_wrapper(BS->CloseProtocol, 4, image, &LoadedImageProtocol, image, NULL);
+        BS->CloseProtocol(image, &LoadedImageProtocol, image, NULL);
         return err;
 }
