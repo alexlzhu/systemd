@@ -730,10 +730,13 @@ CapabilityBoundingSet=~CAP_B CAP_C</programlisting>
 
         <listitem><para>Set the SELinux security context of the executed process. If set, this will override the
         automated domain transition. However, the policy still needs to authorize the transition. This directive is
-        ignored if SELinux is disabled. If prefixed by <literal>-</literal>, all errors will be ignored. This does not
-        affect commands prefixed with <literal>+</literal>.  See <citerefentry
-        project='die-net'><refentrytitle>setexeccon</refentrytitle><manvolnum>3</manvolnum></citerefentry> for
-        details.</para></listitem>
+        ignored if SELinux is disabled. If prefixed by <literal>-</literal>, failing to set the SELinux
+        security context will be ignored, but it's still possible that the subsequent
+        <function>execve()</function> may fail if the policy doesn't allow the transition for the
+        non-overridden context. This does not affect commands prefixed with <literal>+</literal>.  See
+        <citerefentry
+        project='die-net'><refentrytitle>setexeccon</refentrytitle><manvolnum>3</manvolnum></citerefentry>
+        for details.</para></listitem>
       </varlistentry>
 
       <varlistentry>
@@ -3163,7 +3166,7 @@ StandardInputData=SWNrIHNpdHplIGRhIHVuJyBlc3NlIEtsb3BzLAp1ZmYgZWVtYWwga2xvcHAncy
     configuration, with just a few environment variables. The user manager inherits environment variables as
     any other system service, but in addition may receive additional environment variables from PAM, and,
     typically, additional imported variables when the user starts a graphical session. It is recommended to
-    keep the environment blocks in both the system and user managers managers lean. Importing all variables
+    keep the environment blocks in both the system and user managers lean. Importing all variables
     inherited by the graphical session or by one of the user shells is strongly discouraged.</para>
 
     <para>Hint: <command>systemd-run -P env</command> and <command>systemd-run --user -P env</command> print

@@ -271,14 +271,17 @@ int network_verify(Network *network) {
                 network->activation_policy = ACTIVATION_POLICY_UP;
 
         if (network->activation_policy == ACTIVATION_POLICY_ALWAYS_UP) {
-                if (network->ignore_carrier_loss == false)
-                        log_warning("%s: IgnoreCarrierLoss=false conflicts with ActivationPolicy=always-up. "
-                                    "Setting IgnoreCarrierLoss=true.", network->filename);
-                network->ignore_carrier_loss = true;
+                if (network->ignore_carrier_loss_set && network->ignore_carrier_loss_usec < USEC_INFINITY)
+                        log_warning("%s: IgnoreCarrierLoss=no or finite timespan conflicts with ActivationPolicy=always-up. "
+                                    "Setting IgnoreCarrierLoss=yes.", network->filename);
+                network->ignore_carrier_loss_set = true;
+                network->ignore_carrier_loss_usec = USEC_INFINITY;
         }
 
-        if (network->ignore_carrier_loss < 0)
-                network->ignore_carrier_loss = network->configure_without_carrier;
+        if (!network->ignore_carrier_loss_set) {
+                network->ignore_carrier_loss_set = true;
+                network->ignore_carrier_loss_usec = network->configure_without_carrier ? USEC_INFINITY : 0;
+        }
 
         if (IN_SET(network->activation_policy, ACTIVATION_POLICY_DOWN, ACTIVATION_POLICY_ALWAYS_DOWN, ACTIVATION_POLICY_MANUAL)) {
                 if (network->required_for_online < 0 ||
@@ -379,7 +382,6 @@ int network_load_one(Manager *manager, OrderedHashmap **networks, const char *fi
                 .allmulticast = -1,
                 .promiscuous = -1,
 
-                .ignore_carrier_loss = -1,
                 .keep_configuration = _KEEP_CONFIGURATION_INVALID,
 
                 .dhcp_duid.type = _DUID_TYPE_INVALID,
@@ -1256,6 +1258,7 @@ int config_parse_link_group(
 
         Network *network = userdata;
         int r;
+        int32_t group;
 
         assert(filename);
         assert(lvalue);
@@ -1263,19 +1266,69 @@ int config_parse_link_group(
         assert(network);
 
         if (isempty(rvalue)) {
-                network->group = 0;
-                network->group_set = false;
+                network->group = -1;
                 return 0;
         }
 
-        r = safe_atou32(rvalue, &network->group);
+        r = safe_atoi32(rvalue, &group);
         if (r < 0) {
                 log_syntax(unit, LOG_WARNING, filename, line, r,
                            "Failed to parse Group=, ignoring assignment: %s", rvalue);
                 return 0;
         }
 
-        network->group_set = true;
+        if (group < 0) {
+                log_syntax(unit, LOG_WARNING, filename, line, r,
+                           "Value of Group= must be in the range 0…2147483647, ignoring assignment: %s", rvalue);
+                return 0;
+        }
+
+        network->group = group;
+        return 0;
+}
+
+int config_parse_ignore_carrier_loss(
+                const char *unit,
+                const char *filename,
+                unsigned line,
+                const char *section,
+                unsigned section_line,
+                const char *lvalue,
+                int ltype,
+                const char *rvalue,
+                void *data,
+                void *userdata) {
+
+        Network *network = userdata;
+        usec_t usec;
+        int r;
+
+        assert(filename);
+        assert(lvalue);
+        assert(rvalue);
+        assert(network);
+
+        if (isempty(rvalue)) {
+                network->ignore_carrier_loss_set = false;
+                return 0;
+        }
+
+        r = parse_boolean(rvalue);
+        if (r >= 0) {
+                network->ignore_carrier_loss_set = true;
+                network->ignore_carrier_loss_usec = r > 0 ? USEC_INFINITY : 0;
+                return 0;
+        }
+
+        r = parse_sec(rvalue, &usec);
+        if (r < 0) {
+                log_syntax(unit, LOG_WARNING, filename, line, r,
+                           "Failed to parse %s=, ignoring assignment: %s", lvalue, rvalue);
+                return 0;
+        }
+
+        network->ignore_carrier_loss_set = true;
+        network->ignore_carrier_loss_usec = usec;
         return 0;
 }
 

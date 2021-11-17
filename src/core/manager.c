@@ -58,7 +58,7 @@
 #include "manager-dump.h"
 #include "manager-serialize.h"
 #include "memory-util.h"
-#include "mkdir.h"
+#include "mkdir-label.h"
 #include "parse-util.h"
 #include "path-lookup.h"
 #include "path-util.h"
@@ -2246,6 +2246,18 @@ static int manager_dispatch_run_queue(sd_event_source *source, void *userdata) {
                 manager_watch_idle_pipe(m);
 
         return 1;
+}
+
+void manager_trigger_run_queue(Manager *m) {
+        int r;
+
+        assert(m);
+
+        r = sd_event_source_set_enabled(
+                        m->run_queue_event_source,
+                        prioq_isempty(m->run_queue) ? SD_EVENT_OFF : SD_EVENT_ONESHOT);
+        if (r < 0)
+                log_warning_errno(r, "Failed to enable job run queue event source, ignoring: %m");
 }
 
 static unsigned manager_dispatch_dbus_queue(Manager *m) {

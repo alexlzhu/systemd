@@ -37,7 +37,7 @@
 #include "macro.h"
 #include "main-func.h"
 #include "memory-util.h"
-#include "mkdir.h"
+#include "mkdir-label.h"
 #include "parse-util.h"
 #include "process-util.h"
 #include "signal-util.h"
@@ -50,7 +50,7 @@
 #include "strv.h"
 #include "sync-util.h"
 #include "tmpfile-util.h"
-#include "user-record.h"
+#include "uid-alloc-range.h"
 #include "user-util.h"
 
 /* The maximum size up to which we process coredumps */
@@ -385,7 +385,7 @@ static int save_external_coredump(
         if (r < 0)
                 return log_error_errno(r, "Failed to determine coredump file name: %m");
 
-        (void) mkdir_p_label("/var/lib/systemd/coredump", 0755);
+        (void) mkdir_parents_label(fn, 0755);
 
         fd = open_tmpfile_linkable(fn, O_RDWR|O_CLOEXEC, &tmp);
         if (fd < 0)

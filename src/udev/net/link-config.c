@@ -118,8 +118,8 @@ static int link_parse_wol_password(LinkConfig *link, const char *str) {
         if (!p)
                 return -ENOMEM;
 
-        /* Reuse ether_addr_from_string(), as their formats are equivalent. */
-        r = ether_addr_from_string(str, (struct ether_addr*) p);
+        /* Reuse parse_ether_addr(), as their formats are equivalent. */
+        r = parse_ether_addr(str, (struct ether_addr*) p);
         if (r < 0)
                 return r;
 
@@ -349,7 +349,7 @@ bool link_config_should_reload(LinkConfigContext *ctx) {
 
 int link_config_get(LinkConfigContext *ctx, sd_netlink **rtnl, sd_device *device, LinkConfig **ret) {
         unsigned name_assign_type = NET_NAME_UNKNOWN;
-        struct ether_addr permanent_mac = {};
+        struct hw_addr_data hw_addr, permanent_hw_addr;
         unsigned short iftype;
         LinkConfig *link;
         const char *name;
@@ -369,7 +369,7 @@ int link_config_get(LinkConfigContext *ctx, sd_netlink **rtnl, sd_device *device
         if (r < 0)
                 return r;
 
-        r = rtnl_get_link_info(rtnl, ifindex, &iftype, &flags);
+        r = rtnl_get_link_info(rtnl, ifindex, &iftype, &flags, &hw_addr, &permanent_hw_addr);
         if (r < 0)
                 return r;
 
@@ -377,14 +377,19 @@ int link_config_get(LinkConfigContext *ctx, sd_netlink **rtnl, sd_device *device
         if (flags & IFF_LOOPBACK)
                 return -ENOENT;
 
-        r = ethtool_get_permanent_macaddr(&ctx->ethtool_fd, name, &permanent_mac);
-        if (r < 0)
-                log_device_debug_errno(device, r, "Failed to get permanent MAC address, ignoring: %m");
+        if (hw_addr.length > 0 && permanent_hw_addr.length == 0) {
+                r = ethtool_get_permanent_hw_addr(&ctx->ethtool_fd, name, &permanent_hw_addr);
+                if (r < 0)
+                        log_device_debug_errno(device, r, "Failed to get permanent hardware address, ignoring: %m");
+        }
 
         (void) link_unsigned_attribute(device, "name_assign_type", &name_assign_type);
 
         LIST_FOREACH(links, link, ctx->links) {
-                r = net_match_config(&link->match, device, NULL, &permanent_mac, NULL, iftype, NULL, NULL, 0, NULL, NULL);
+                r = net_match_config(&link->match, device,
+                                     hw_addr.length == ETH_ALEN ? &hw_addr.ether : NULL,
+                                     permanent_hw_addr.length == ETH_ALEN ? &permanent_hw_addr.ether : NULL,
+                                     NULL, iftype, NULL, NULL, 0, NULL, NULL);
                 if (r < 0)
                         return r;
                 if (r == 0)

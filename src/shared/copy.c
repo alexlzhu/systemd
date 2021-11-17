@@ -20,6 +20,7 @@
 #include "io-util.h"
 #include "macro.h"
 #include "missing_syscall.h"
+#include "mkdir-label.h"
 #include "mountpoint-util.h"
 #include "nulstr-util.h"
 #include "rm-rf.h"
@@ -1380,10 +1381,7 @@ int copy_access(int fdf, int fdt) {
         if (fstat(fdf, &st) < 0)
                 return -errno;
 
-        if (fchmod(fdt, st.st_mode & 07777) < 0)
-                return -errno;
-
-        return 0;
+        return RET_NERRNO(fchmod(fdt, st.st_mode & 07777));
 }
 
 int copy_rights_with_fallback(int fdf, int fdt, const char *patht) {

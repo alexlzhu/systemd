@@ -12,9 +12,15 @@ on:
       - 'src/**'
       - 'test/fuzz/**'
 
+permissions:
+  contents: read
+
 jobs:
   build:
     runs-on: ubuntu-20.04
+    concurrency:
+      group: ${{ github.workflow }}-${{ matrix.env.COMPILER }}-${{ matrix.env.COMPILER_VERSION }}-${{ github.ref }}
+      cancel-in-progress: true
     strategy:
       fail-fast: false
       matrix:
@@ -27,6 +33,6 @@ jobs:
     env: ${{ matrix.env }}
     steps:
       - name: Repository checkout
-        uses: actions/checkout@v1
+        uses: actions/checkout@ec3a7ce113134d7a93b817d10a8272cb61118579
       - name: Build check (${{ env.COMPILER }}-${{ env.COMPILER_VERSION }})
         run: sudo -E .github/workflows/build_test.sh

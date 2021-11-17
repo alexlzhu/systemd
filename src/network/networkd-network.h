@@ -96,8 +96,7 @@ struct Network {
         /* [Link] section */
         struct ether_addr *mac;
         uint32_t mtu;
-        uint32_t group;
-        bool group_set;
+        int32_t group;
         int arp;
         int multicast;
         int allmulticast;
@@ -110,7 +109,8 @@ struct Network {
 
         /* misc settings */
         bool configure_without_carrier;
-        int ignore_carrier_loss;
+        bool ignore_carrier_loss_set;
+        usec_t ignore_carrier_loss_usec; /* timespan */
         KeepConfiguration keep_configuration;
         char **bind_carrier;
         bool default_route_on_device;
@@ -384,6 +384,7 @@ CONFIG_PARSER_PROTOTYPE(config_parse_keep_configuration);
 CONFIG_PARSER_PROTOTYPE(config_parse_ipv6_link_local_address_gen_mode);
 CONFIG_PARSER_PROTOTYPE(config_parse_activation_policy);
 CONFIG_PARSER_PROTOTYPE(config_parse_link_group);
+CONFIG_PARSER_PROTOTYPE(config_parse_ignore_carrier_loss);
 
 const struct ConfigPerfItem* network_network_gperf_lookup(const char *key, GPERF_LEN_TYPE length);
 

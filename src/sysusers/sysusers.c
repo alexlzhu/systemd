@@ -31,8 +31,8 @@
 #include "strv.h"
 #include "sync-util.h"
 #include "tmpfile-util-label.h"
+#include "uid-alloc-range.h"
 #include "uid-range.h"
-#include "user-record.h"
 #include "user-util.h"
 #include "utf8.h"
 #include "util.h"
@@ -958,10 +958,7 @@ static int root_stat(const char *p, struct stat *st) {
         const char *fix;
 
         fix = prefix_roota(arg_root, p);
-        if (stat(fix, st) < 0)
-                return -errno;
-
-        return 0;
+        return RET_NERRNO(stat(fix, st));
 }
 
 static int read_id_from_file(Item *i, uid_t *_uid, gid_t *_gid) {

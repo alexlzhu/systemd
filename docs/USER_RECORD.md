@@ -476,6 +476,9 @@ executed to make sure the image matches the selected option.
 to trim/allocate the file system/backing file when deactivating the home
 directory.
 
+`luksExtraMountOptions` → A string with additional mount options to append to
+the default mount options for the file system in the LUKS volume.
+
 `luksCipher` → A string, indicating the cipher to use for the LUKS storage mechanism.
 
 `luksCipherMode` → A string, selecting the cipher mode to use for the LUKS storage mechanism.
@@ -862,6 +865,11 @@ determined the home directory is in internal built-in media. (This is used by
 on removable media the delay is selected very low to minimize the chance the
 home directory remains in unclean state if the storage device is removed from
 the system by the user).
+
+`accessMode` → The access mode currently in effect for the home directory iself.
+
+`fileSystemType` → The file system type backing the home directory: a short
+string, such as "btrfs", "ext4", "xfs".
 
 ## Fields in the `signature` section
 

@@ -55,7 +55,7 @@ typedef struct Link {
         char *state_file;
         struct hw_addr_data hw_addr;
         struct hw_addr_data bcast_addr;
-        struct ether_addr permanent_mac;
+        struct hw_addr_data permanent_hw_addr;
         struct in6_addr ipv6ll_address;
         uint32_t mtu;
         uint32_t min_mtu;
@@ -67,10 +67,13 @@ typedef struct Link {
         /* wlan */
         enum nl80211_iftype wlan_iftype;
         char *ssid;
+        char *previous_ssid;
         struct ether_addr bssid;
 
         unsigned flags;
         uint8_t kernel_operstate;
+
+        sd_event_source *carrier_lost_timer;
 
         Network *network;
 

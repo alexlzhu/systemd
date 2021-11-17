@@ -10,42 +10,6 @@
 #include "missing_resource.h"
 #include "time-util.h"
 
-/* But some limits on disk sizes: not less than 5M, not more than 5T */
-#define USER_DISK_SIZE_MIN (UINT64_C(5)*1024*1024)
-#define USER_DISK_SIZE_MAX (UINT64_C(5)*1024*1024*1024*1024)
-
-/* The default disk size to use when nothing else is specified, relative to free disk space */
-#define USER_DISK_SIZE_DEFAULT_PERCENT 85
-
-bool uid_is_system(uid_t uid);
-bool gid_is_system(gid_t gid);
-
-static inline bool uid_is_dynamic(uid_t uid) {
-        return DYNAMIC_UID_MIN <= uid && uid <= DYNAMIC_UID_MAX;
-}
-
-static inline bool gid_is_dynamic(gid_t gid) {
-        return uid_is_dynamic((uid_t) gid);
-}
-
-static inline bool uid_is_container(uid_t uid) {
-        return CONTAINER_UID_BASE_MIN <= uid && uid <= CONTAINER_UID_BASE_MAX;
-}
-
-static inline bool gid_is_container(gid_t gid) {
-        return uid_is_container((uid_t) gid);
-}
-
-typedef struct UGIDAllocationRange {
-        uid_t system_alloc_uid_min;
-        uid_t system_uid_max;
-        gid_t system_alloc_gid_min;
-        gid_t system_gid_max;
-} UGIDAllocationRange;
-
-int read_login_defs(UGIDAllocationRange *ret_defs, const char *path, const char *root);
-const UGIDAllocationRange *acquire_ugid_allocation_range(void);
-
 typedef enum UserDisposition {
         USER_INTRINSIC,   /* root and nobody */
         USER_SYSTEM,      /* statically allocated users for system services */
@@ -331,6 +295,7 @@ typedef struct UserRecord {
         uint64_t luks_pbkdf_time_cost_usec;
         uint64_t luks_pbkdf_memory_cost;
         uint64_t luks_pbkdf_parallel_threads;
+        char *luks_extra_mount_options;
 
         uint64_t disk_usage;
         uint64_t disk_free;

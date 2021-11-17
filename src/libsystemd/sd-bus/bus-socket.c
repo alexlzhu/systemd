@@ -301,8 +301,8 @@ static int verify_external_token(sd_bus *b, const char *p, size_t l) {
         uid_t u;
         int r;
 
-        /* We don't do any real authentication here. Instead, we if
-         * the owner of this bus wanted authentication he should have
+        /* We don't do any real authentication here. Instead, if 
+         * the owner of this bus wanted authentication they should have
          * checked SO_PEERCRED before even creating the bus object. */
 
         if (!b->anonymous_auth && !b->ucred_valid)
@@ -968,7 +968,7 @@ int bus_socket_exec(sd_bus *b) {
                 _cleanup_free_ char *line = NULL;
 
                 if (b->exec_argv)
-                        line = quote_command_line(b->exec_argv);
+                        line = quote_command_line(b->exec_argv, SHELL_ESCAPE_EMPTY);
 
                 log_debug("sd-bus: starting bus%s%s with %s%s",
                           b->description ? " " : "", strempty(b->description),

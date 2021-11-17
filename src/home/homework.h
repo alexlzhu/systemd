@@ -6,14 +6,14 @@
 
 #include "sd-id128.h"
 
+#include "homework-password-cache.h"
 #include "loop-util.h"
-#include "strv.h"
 #include "user-record.h"
 #include "user-record-util.h"
 
 typedef struct HomeSetup {
-        char *dm_name;
-        char *dm_node;
+        char *dm_name;   /* "home-<username>" */
+        char *dm_node;   /* "/dev/mapper/home-<username>" */
 
         LoopDevice *loop;
         struct crypt_device *crypt_device;
@@ -43,22 +43,6 @@ typedef struct HomeSetup {
         char *temporary_image_path;
 } HomeSetup;
 
-typedef struct PasswordCache {
-        /* Decoding passwords from security tokens is expensive and typically requires user interaction,
-         * hence cache any we already figured out. */
-        char **pkcs11_passwords;
-        char **fido2_passwords;
-} PasswordCache;
-
-void password_cache_free(PasswordCache *cache);
-
-static inline bool password_cache_contains(const PasswordCache *cache, const char *p) {
-        if (!cache)
-                return false;
-
-        return strv_contains(cache->pkcs11_passwords, p) || strv_contains(cache->fido2_passwords, p);
-}
-
 #define HOME_SETUP_INIT                                 \
         {                                               \
                 .root_fd = -1,                          \
@@ -69,10 +53,16 @@ static inline bool password_cache_contains(const PasswordCache *cache, const cha
 
 /* Various flags for the operation of setting up a home directory */
 typedef enum HomeSetupFlags {
-        HOME_SETUP_ALREADY_ACTIVATED = 1 << 0, /* Open an already activated home, rather than activate it afresh */
+        HOME_SETUP_ALREADY_ACTIVATED           = 1 << 0, /* Open an already activated home, rather than activate it afresh */
 
         /* CIFS backend: */
-        HOME_SETUP_CIFS_MKDIR        = 1 << 1, /* Create CIFS subdir when missing */
+        HOME_SETUP_CIFS_MKDIR                  = 1 << 1, /* Create CIFS subdir when missing */
+
+        /* Applies only for resize operations */
+        HOME_SETUP_RESIZE_DONT_SYNC_IDENTITIES = 1 << 2, /* Don't sync identity records into home and LUKS header */
+        HOME_SETUP_RESIZE_MINIMIZE             = 1 << 3, /* Shrink to minimal size */
+        HOME_SETUP_RESIZE_DONT_GROW            = 1 << 4, /* If the resize would grow, gracefully terminate operation */
+        HOME_SETUP_RESIZE_DONT_SHRINK          = 1 << 5, /* If the resize would shrink, gracefully terminate operation */
 } HomeSetupFlags;
 
 int home_setup_done(HomeSetup *setup);

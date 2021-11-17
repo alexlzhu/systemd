@@ -55,8 +55,9 @@ endif
 
 #####################################################################
 
+fs = import('fs')
 if get_option('split-usr') == 'auto'
-        split_usr = run_command('test', '-L', '/bin').returncode() != 0
+        split_usr = not fs.is_symlink('/bin')
 else
         split_usr = get_option('split-usr') == 'true'
 endif
@@ -69,7 +70,7 @@ conf.set10('HAVE_SPLIT_USR', split_usr,
            description : '/usr/bin and /bin directories are separate')
 
 if get_option('split-bin') == 'auto'
-        split_bin = run_command('test', '-L', '/usr/sbin').returncode() != 0
+        split_bin = not fs.is_symlink('/usr/sbin')
 else
         split_bin = get_option('split-bin') == 'true'
 endif
@@ -347,7 +348,6 @@ possible_common_cc_flags = [
         '-Werror=shift-count-overflow',
         '-Werror=shift-overflow=2',
         '-Werror=undef',
-        '-Werror=unused-function',
         '-Wfloat-equal',
         '-Wimplicit-fallthrough=5',
         '-Winit-self',
@@ -362,6 +362,7 @@ possible_common_cc_flags = [
         '-Wstrict-aliasing=2',
         '-Wstrict-prototypes',
         '-Wsuggest-attribute=noreturn',
+        '-Wunused-function',
         '-Wwrite-strings',
 
         # negative arguments are correctly detected starting with meson 0.46.
@@ -408,7 +409,6 @@ possible_cc_flags = possible_common_cc_flags + [
         '-Werror=missing-declarations',
         '-Werror=missing-prototypes',
         '-fdiagnostics-show-option',
-        '-ffast-math',
         '-fno-common',
         '-fno-strict-aliasing',
         '-fstack-protector',
@@ -593,7 +593,6 @@ versiondep = declare_dependency(sources: version_h)
 
 sh = find_program('sh')
 echo = find_program('echo')
-test = find_program('test')
 sed = find_program('sed')
 awk = find_program('awk')
 stat = find_program('stat')
@@ -742,7 +741,7 @@ endif
 time_epoch = get_option('time-epoch')
 if time_epoch == -1
         time_epoch = run_command(sh, '-c', 'echo "$SOURCE_DATE_EPOCH"').stdout().strip()
-        if time_epoch == '' and git.found() and run_command('test', '-e', '.git').returncode() == 0
+        if time_epoch == '' and git.found() and fs.exists('.git')
                 # If we're in a git repository, use the creation time of the latest git tag.
                 latest_tag = run_command(git, 'describe', '--abbrev=0', '--tags').stdout().strip()
                 time_epoch = run_command(git, 'log', '--no-show-signature', '-1', '--format=%at', latest_tag).stdout()
@@ -1641,39 +1640,8 @@ conf.set10('SYSTEMD_SLOW_TESTS_DEFAULT', slow_tests)
 
 #####################################################################
 
-if get_option('efi')
-        efi_arch = host_machine.cpu_family()
-
-        if efi_arch == 'x86'
-                EFI_MACHINE_TYPE_NAME = 'ia32'
-                gnu_efi_arch = 'ia32'
-        elif efi_arch == 'x86_64'
-                EFI_MACHINE_TYPE_NAME = 'x64'
-                gnu_efi_arch = 'x86_64'
-        elif efi_arch == 'arm'
-                EFI_MACHINE_TYPE_NAME = 'arm'
-                gnu_efi_arch = 'arm'
-        elif efi_arch == 'aarch64'
-                EFI_MACHINE_TYPE_NAME = 'aa64'
-                gnu_efi_arch = 'aarch64'
-        elif efi_arch == 'riscv64'
-                EFI_MACHINE_TYPE_NAME = 'riscv64'
-                gnu_efi_arch = 'riscv64'
-        else
-                EFI_MACHINE_TYPE_NAME = ''
-                gnu_efi_arch = ''
-        endif
-
-        have = true
-        conf.set_quoted('EFI_MACHINE_TYPE_NAME', EFI_MACHINE_TYPE_NAME)
-else
-        have = false
-endif
-conf.set10('ENABLE_EFI', have)
-
 subdir('src/fundamental')
 subdir('src/boot/efi')
-conf.set10('HAVE_GNU_EFI', have_gnu_efi)
 
 ############################################################
 
@@ -3887,19 +3855,14 @@ summary({
 # CPPFLAGS: ${OUR_CPPFLAGS} ${CPPFLAGS}
 # LDFLAGS:  ${OUR_LDFLAGS} ${LDFLAGS}
 
-if conf.get('ENABLE_EFI') == 1
-        summary({'EFI arch' : efi_arch},
+if conf.get('ENABLE_EFI') == 1 and conf.get('HAVE_GNU_EFI') == 1
+        summary({
+                'EFI machine type' :                efi_arch[0],
+                'EFI CC' :                          '@0@'.format(' '.join(efi_cc)),
+                'EFI lds' :                         efi_lds,
+                'EFI crt0' :                        efi_crt0,
+                'EFI include directory' :           efi_incdir},
                 section : 'Extensible Firmware Interface')
-
-        if have_gnu_efi
-                summary({
-                        'EFI machine type' :                EFI_MACHINE_TYPE_NAME,
-                        'EFI CC' :                          '@0@'.format(' '.join(efi_cc)),
-                        'EFI lds' :                         efi_lds,
-                        'EFI crt0' :                        efi_crt0,
-                        'EFI include directory' :           efi_incdir},
-                        section : 'Extensible Firmware Interface')
-        endif
 endif
 
 found = []
@@ -3947,11 +3910,11 @@ foreach tuple : [
         # components
         ['backlight'],
         ['binfmt'],
-        ['bpf-framework',         conf.get('BPF_FRAMEWORK') == 1],
+        ['bpf-framework'],
         ['coredump'],
         ['environment.d'],
         ['efi'],
-        ['gnu-efi',               have_gnu_efi],
+        ['gnu-efi'],
         ['firstboot'],
         ['hibernate'],
         ['homed'],
@@ -4008,7 +3971,7 @@ foreach tuple : [
         ['debug hashmap'],
         ['debug mmap cache'],
         ['debug siphash'],
-        ['valgrind',              conf.get('VALGRIND') == 1],
+        ['valgrind'],
         ['trace logging',         conf.get('LOG_TRACE') == 1],
         ['install tests',         install_tests],
         ['link-udev-shared',      get_option('link-udev-shared')],

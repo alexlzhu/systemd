@@ -21,7 +21,7 @@
 #include "format-util.h"
 #include "io-util.h"
 #include "label.h"
-#include "mkdir.h"
+#include "mkdir-label.h"
 #include "mount-util.h"
 #include "mount.h"
 #include "mountpoint-util.h"
@@ -425,10 +425,7 @@ static int autofs_set_timeout(int dev_autofs_fd, int ioctl_fd, usec_t usec) {
                 /* Convert to seconds, rounding up. */
                 param.timeout.timeout = DIV_ROUND_UP(usec, USEC_PER_SEC);
 
-        if (ioctl(dev_autofs_fd, AUTOFS_DEV_IOCTL_TIMEOUT, &param) < 0)
-                return -errno;
-
-        return 0;
+        return RET_NERRNO(ioctl(dev_autofs_fd, AUTOFS_DEV_IOCTL_TIMEOUT, &param));
 }
 
 static int autofs_send_ready(int dev_autofs_fd, int ioctl_fd, uint32_t token, int status) {
@@ -446,10 +443,7 @@ static int autofs_send_ready(int dev_autofs_fd, int ioctl_fd, uint32_t token, in
         } else
                 param.ready.token = token;
 
-        if (ioctl(dev_autofs_fd, status ? AUTOFS_DEV_IOCTL_FAIL : AUTOFS_DEV_IOCTL_READY, &param) < 0)
-                return -errno;
-
-        return 0;
+        return RET_NERRNO(ioctl(dev_autofs_fd, status ? AUTOFS_DEV_IOCTL_FAIL : AUTOFS_DEV_IOCTL_READY, &param));
 }
 
 static int automount_send_ready(Automount *a, Set *tokens, int status) {
@@ -1063,7 +1057,7 @@ static bool automount_supported(void) {
         return supported;
 }
 
-static int automount_test_start_limit(Unit *u) {
+static int automount_can_start(Unit *u) {
         Automount *a = AUTOMOUNT(u);
         int r;
 
@@ -1075,7 +1069,7 @@ static int automount_test_start_limit(Unit *u) {
                 return r;
         }
 
-        return 0;
+        return 1;
 }
 
 static const char* const automount_result_table[_AUTOMOUNT_RESULT_MAX] = {
@@ -1142,5 +1136,5 @@ const UnitVTable automount_vtable = {
                 },
         },
 
-        .test_start_limit = automount_test_start_limit,
+        .can_start = automount_can_start,
 };

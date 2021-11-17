@@ -173,6 +173,8 @@ shared_sources = files('''
         json.h
         kbd-util.c
         kbd-util.h
+        keyring-util.h
+        keyring-util.c
         killall.c
         killall.h
         label.c
@@ -207,6 +209,7 @@ shared_sources = files('''
         macvlan-util.h
         main-func.h
         mkdir-label.c
+        mkdir-label.h
         mkfs-util.c
         mkfs-util.h
         module-util.h
@@ -290,6 +293,8 @@ shared_sources = files('''
         tpm2-util.h
         udev-util.c
         udev-util.h
+        uid-alloc-range.c
+        uid-alloc-range.h
         uid-range.c
         uid-range.h
         user-record-nss.c

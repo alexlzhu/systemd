@@ -45,14 +45,14 @@ struct ConfigPerfItem;
 %struct-type
 %includes
 %%
-Match.MACAddress,                            config_parse_hwaddrs,                                     0,                             offsetof(Network, match.mac)
-Match.PermanentMACAddress,                   config_parse_hwaddrs,                                     0,                             offsetof(Network, match.permanent_mac)
+Match.MACAddress,                            config_parse_ether_addrs,                                 0,                             offsetof(Network, match.mac)
+Match.PermanentMACAddress,                   config_parse_ether_addrs,                                 0,                             offsetof(Network, match.permanent_mac)
 Match.Path,                                  config_parse_match_strv,                                  0,                             offsetof(Network, match.path)
 Match.Driver,                                config_parse_match_strv,                                  0,                             offsetof(Network, match.driver)
 Match.Type,                                  config_parse_match_strv,                                  0,                             offsetof(Network, match.iftype)
 Match.WLANInterfaceType,                     config_parse_match_strv,                                  0,                             offsetof(Network, match.wlan_iftype)
 Match.SSID,                                  config_parse_match_strv,                                  0,                             offsetof(Network, match.ssid)
-Match.BSSID,                                 config_parse_hwaddrs,                                     0,                             offsetof(Network, match.bssid)
+Match.BSSID,                                 config_parse_ether_addrs,                                 0,                             offsetof(Network, match.bssid)
 Match.Name,                                  config_parse_match_ifnames,                               IFNAME_VALID_ALTERNATIVE,      offsetof(Network, match.ifname)
 Match.Property,                              config_parse_match_property,                              0,                             offsetof(Network, match.property)
 Match.Host,                                  config_parse_net_condition,                               CONDITION_HOST,                offsetof(Network, conditions)
@@ -61,7 +61,7 @@ Match.KernelCommandLine,                     config_parse_net_condition,        
 Match.KernelVersion,                         config_parse_net_condition,                               CONDITION_KERNEL_VERSION,      offsetof(Network, conditions)
 Match.Architecture,                          config_parse_net_condition,                               CONDITION_ARCHITECTURE,        offsetof(Network, conditions)
 Match.Firmware,                              config_parse_net_condition,                               CONDITION_FIRMWARE,            offsetof(Network, conditions)
-Link.MACAddress,                             config_parse_hwaddr,                                      0,                             offsetof(Network, mac)
+Link.MACAddress,                             config_parse_ether_addr,                                  0,                             offsetof(Network, mac)
 Link.MTUBytes,                               config_parse_mtu,                                         AF_UNSPEC,                     offsetof(Network, mtu)
 Link.Group,                                  config_parse_link_group,                                  0,                             0
 Link.ARP,                                    config_parse_tristate,                                    0,                             offsetof(Network, arp)
@@ -135,7 +135,7 @@ Network.ProxyARP,                            config_parse_tristate,             
 Network.IPv6ProxyNDPAddress,                 config_parse_ipv6_proxy_ndp_address,                      0,                             0
 Network.BindCarrier,                         config_parse_strv,                                        0,                             offsetof(Network, bind_carrier)
 Network.ConfigureWithoutCarrier,             config_parse_bool,                                        0,                             offsetof(Network, configure_without_carrier)
-Network.IgnoreCarrierLoss,                   config_parse_tristate,                                    0,                             offsetof(Network, ignore_carrier_loss)
+Network.IgnoreCarrierLoss,                   config_parse_ignore_carrier_loss,                         0,                             0
 Network.KeepConfiguration,                   config_parse_keep_configuration,                          0,                             offsetof(Network, keep_configuration)
 Network.IPv6SendRA,                          config_parse_router_prefix_delegation,                    0,                             offsetof(Network, router_prefix_delegation)
 Network.DHCPv6PrefixDelegation,              config_parse_tristate,                                    0,                             offsetof(Network, dhcp6_pd)
@@ -156,7 +156,7 @@ IPv6AddressLabel.Prefix,                     config_parse_address_label_prefix, 
 IPv6AddressLabel.Label,                      config_parse_address_label,                               0,                             0
 Neighbor.Address,                            config_parse_neighbor_address,                            0,                             0
 Neighbor.LinkLayerAddress,                   config_parse_neighbor_lladdr,                             0,                             0
-Neighbor.MACAddress,                         config_parse_neighbor_hwaddr,                             0,                             0 /* deprecated */
+Neighbor.MACAddress,                         config_parse_neighbor_lladdr,                             0,                             0 /* deprecated */
 RoutingPolicyRule.TypeOfService,             config_parse_routing_policy_rule_tos,                     0,                             0
 RoutingPolicyRule.Priority,                  config_parse_routing_policy_rule_priority,                0,                             0
 RoutingPolicyRule.Table,                     config_parse_routing_policy_rule_table,                   0,                             0
@@ -171,6 +171,7 @@ RoutingPolicyRule.DestinationPort,           config_parse_routing_policy_rule_po
 RoutingPolicyRule.InvertRule,                config_parse_routing_policy_rule_invert,                  0,                             0
 RoutingPolicyRule.Family,                    config_parse_routing_policy_rule_family,                  0,                             0
 RoutingPolicyRule.User,                      config_parse_routing_policy_rule_uid_range,               0,                             0
+RoutingPolicyRule.SuppressInterfaceGroup,    config_parse_routing_policy_rule_suppress_ifgroup,        0,                             0
 RoutingPolicyRule.SuppressPrefixLength,      config_parse_routing_policy_rule_suppress_prefixlen,      0,                             0
 RoutingPolicyRule.Type,                      config_parse_routing_policy_rule_type,                    0,                             0
 Route.Gateway,                               config_parse_gateway,                                     0,                             0

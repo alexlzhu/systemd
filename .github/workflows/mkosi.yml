@@ -8,13 +8,21 @@ on:
   push:
     branches:
       - main
+      - v[0-9]+-stable
   pull_request:
     branches:
       - main
+      - v[0-9]+-stable
+
+permissions:
+  contents: read
 
 jobs:
   ci:
     runs-on: ubuntu-20.04
+    concurrency:
+      group: ${{ github.workflow }}-${{ matrix.distro }}-${{ github.ref }}
+      cancel-in-progress: true
     strategy:
       fail-fast: false
       matrix:
@@ -26,8 +34,8 @@ jobs:
           - opensuse
 
     steps:
-    - uses: actions/checkout@v2
-    - uses: systemd/mkosi@v10
+    - uses: actions/checkout@ec3a7ce113134d7a93b817d10a8272cb61118579
+    - uses: systemd/mkosi@4d64fc8134f93d87ac584183e7762ac1d0efa0e5
 
     - name: Install
       run: sudo apt-get update && sudo apt-get install --no-install-recommends python3-pexpect python3-jinja2
