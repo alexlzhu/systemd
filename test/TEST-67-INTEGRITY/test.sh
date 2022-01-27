@@ -5,7 +5,7 @@ set -e
 TEST_DESCRIPTION="dm-integrity test"
 
 TEST_NO_NSPAWN=1
-QEMU_TIMEOUT=300
+QEMU_TIMEOUT=600
 
 # shellcheck source=test/test-functions
 . "${TEST_BASE_DIR:?}/test-functions"
@@ -15,7 +15,6 @@ test_append_files() {(
     instmods loop =block
     instmods dm_integrity =md
 
-    inst_binary losetup
     inst_binary integritysetup
     inst_binary blkid
     install_dmevent

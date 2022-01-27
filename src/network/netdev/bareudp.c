@@ -1,6 +1,9 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later
  * Copyright © 2020 VMware, Inc. */
 
+#include <netinet/in.h>
+#include <linux/if_arp.h>
+
 #include "bareudp.h"
 #include "netlink-util.h"
 #include "networkd-manager.h"
@@ -30,11 +33,11 @@ static int netdev_bare_udp_fill_message_create(NetDev *netdev, Link *link, sd_ne
 
         r = sd_netlink_message_append_u16(m, IFLA_BAREUDP_ETHERTYPE, htobe16(u->iftype));
         if (r < 0)
-                return log_netdev_error_errno(netdev, r, "Could not append IFLA_BAREUDP_ETHERTYPE attribute: %m");
+                return r;
 
         r = sd_netlink_message_append_u16(m, IFLA_BAREUDP_PORT, htobe16(u->dest_port));
         if (r < 0)
-                return log_netdev_error_errno(netdev, r, "Could not append IFLA_BAREUDP_PORT attribute: %m");
+                return r;
 
         return 0;
 }
@@ -79,4 +82,5 @@ const NetDevVTable bare_udp_vtable = {
         .config_verify = netdev_bare_udp_verify,
         .fill_message_create = netdev_bare_udp_fill_message_create,
         .create_type = NETDEV_CREATE_INDEPENDENT,
+        .iftype = ARPHRD_NONE,
 };

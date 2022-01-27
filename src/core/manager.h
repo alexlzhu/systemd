@@ -102,6 +102,7 @@ typedef enum ManagerTimestamp {
         MANAGER_TIMESTAMP_GENERATORS_FINISH,
         MANAGER_TIMESTAMP_UNITS_LOAD_START,
         MANAGER_TIMESTAMP_UNITS_LOAD_FINISH,
+        MANAGER_TIMESTAMP_UNITS_LOAD,
 
         MANAGER_TIMESTAMP_INITRD_SECURITY_START,
         MANAGER_TIMESTAMP_INITRD_SECURITY_FINISH,
@@ -572,7 +573,7 @@ ManagerTimestamp manager_timestamp_initrd_mangle(ManagerTimestamp s);
 
 usec_t manager_get_watchdog(Manager *m, WatchdogType t);
 void manager_set_watchdog(Manager *m, WatchdogType t, usec_t timeout);
-int manager_override_watchdog(Manager *m, WatchdogType t, usec_t timeout);
+void manager_override_watchdog(Manager *m, WatchdogType t, usec_t timeout);
 
 const char* oom_policy_to_string(OOMPolicy i) _const_;
 OOMPolicy oom_policy_from_string(const char *s) _pure_;

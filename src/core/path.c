@@ -184,7 +184,7 @@ int path_spec_fd_event(PathSpec *s, uint32_t revents) {
 
         l = read(s->inotify_fd, &buffer, sizeof(buffer));
         if (l < 0) {
-                if (IN_SET(errno, EAGAIN, EINTR))
+                if (ERRNO_IS_TRANSIENT(errno))
                         return 0;
 
                 return log_error_errno(errno, "Failed to read inotify event: %m");
@@ -215,7 +215,7 @@ static bool path_spec_check_good(PathSpec *s, bool initial, bool from_trigger_no
                 int k;
 
                 k = dir_is_empty(s->path);
-                good = !(k == -ENOENT || k > 0);
+                good = !(IN_SET(k, -ENOENT, -ENOTDIR) || k > 0);
                 break;
         }
 
@@ -265,6 +265,9 @@ static void path_init(Unit *u) {
         assert(u->load_state == UNIT_STUB);
 
         p->directory_mode = 0755;
+
+        p->trigger_limit.interval = USEC_INFINITY;
+        p->trigger_limit.burst = UINT_MAX;
 }
 
 void path_free_specs(Path *p) {
@@ -353,6 +356,16 @@ static int path_add_trigger_dependencies(Path *p) {
 static int path_add_extras(Path *p) {
         int r;
 
+        assert(p);
+
+        /* To avoid getting pid1 in a busy-loop state (eg: failed condition on associated service),
+         * set a default trigger limit if the user didn't specify any. */
+        if (p->trigger_limit.interval == USEC_INFINITY)
+                p->trigger_limit.interval = 2 * USEC_PER_SEC;
+
+        if (p->trigger_limit.burst == UINT_MAX)
+                p->trigger_limit.burst = 200;
+
         r = path_add_trigger_dependencies(p);
         if (r < 0)
                 return r;
@@ -400,12 +413,16 @@ static void path_dump(Unit *u, FILE *f, const char *prefix) {
                 "%sResult: %s\n"
                 "%sUnit: %s\n"
                 "%sMakeDirectory: %s\n"
-                "%sDirectoryMode: %04o\n",
+                "%sDirectoryMode: %04o\n"
+                "%sTriggerLimitIntervalSec: %s\n"
+                "%sTriggerLimitBurst: %u\n",
                 prefix, path_state_to_string(p->state),
                 prefix, path_result_to_string(p->result),
                 prefix, trigger ? trigger->id : "n/a",
                 prefix, yes_no(p->make_directory),
-                prefix, p->directory_mode);
+                prefix, p->directory_mode,
+                prefix, FORMAT_TIMESPAN(p->trigger_limit.interval, USEC_PER_SEC),
+                prefix, p->trigger_limit.burst);
 
         LIST_FOREACH(spec, s, p->specs)
                 path_spec_dump(s, f, prefix);
@@ -480,7 +497,7 @@ static void path_enter_dead(Path *p, PathResult f) {
                 p->result = f;
 
         unit_log_result(UNIT(p), p->result == PATH_SUCCESS, path_result_to_string(p->result));
-        path_set_state(p, p->result == PATH_SUCCESS ? PATH_DEAD : PATH_FAILED);
+        path_set_state(p, p->result != PATH_SUCCESS ? PATH_FAILED : PATH_DEAD);
 }
 
 static void path_enter_running(Path *p) {
@@ -493,6 +510,12 @@ static void path_enter_running(Path *p) {
         /* Don't start job if we are supposed to go down */
         if (unit_stop_pending(UNIT(p)))
                 return;
+
+        if (!ratelimit_below(&p->trigger_limit)) {
+                log_unit_warning(UNIT(p), "Trigger limit hit, refusing further activation.");
+                path_enter_dead(p, PATH_FAILURE_TRIGGER_LIMIT_HIT);
+                return;
+        }
 
         trigger = UNIT_TRIGGER(UNIT(p));
         if (!trigger) {
@@ -780,11 +803,6 @@ static void path_trigger_notify(Unit *u, Unit *other) {
                 return;
         }
 
-        if (unit_has_failed_condition_or_assert(other)) {
-                path_enter_dead(p, PATH_FAILURE_UNIT_CONDITION_FAILED);
-                return;
-        }
-
         /* Don't propagate anything if there's still a job queued */
         if (other->job)
                 return;
@@ -837,11 +855,11 @@ static const char* const path_type_table[_PATH_TYPE_MAX] = {
 DEFINE_STRING_TABLE_LOOKUP(path_type, PathType);
 
 static const char* const path_result_table[_PATH_RESULT_MAX] = {
-        [PATH_SUCCESS]                       = "success",
-        [PATH_FAILURE_RESOURCES]             = "resources",
-        [PATH_FAILURE_START_LIMIT_HIT]       = "start-limit-hit",
-        [PATH_FAILURE_UNIT_START_LIMIT_HIT]  = "unit-start-limit-hit",
-        [PATH_FAILURE_UNIT_CONDITION_FAILED] = "unit-condition-failed",
+        [PATH_SUCCESS]                      = "success",
+        [PATH_FAILURE_RESOURCES]            = "resources",
+        [PATH_FAILURE_START_LIMIT_HIT]      = "start-limit-hit",
+        [PATH_FAILURE_UNIT_START_LIMIT_HIT] = "unit-start-limit-hit",
+        [PATH_FAILURE_TRIGGER_LIMIT_HIT]    = "trigger-limit-hit",
 };
 
 DEFINE_STRING_TABLE_LOOKUP(path_result, PathResult);

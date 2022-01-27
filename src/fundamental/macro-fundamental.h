@@ -13,6 +13,7 @@
 #define _pure_ __attribute__((__pure__))
 #define _section_(x) __attribute__((__section__(x)))
 #define _packed_ __attribute__((__packed__))
+#define _retain_ __attribute__((__retain__))
 #define _used_ __attribute__((__used__))
 #define _unused_ __attribute__((__unused__))
 #define _cleanup_(x) __attribute__((__cleanup__(x)))
@@ -64,6 +65,14 @@
         #define memcpy(a, b, c) CopyMem((a), (b), (c))
         #define free(a) FreePool(a)
 #endif
+
+/* This passes the argument through after (if asserts are enabled) checking that it is not null. */
+#define ASSERT_PTR(expr)                        \
+        ({                                      \
+                typeof(expr) _expr_ = (expr);   \
+                assert(_expr_);                 \
+                _expr_;                         \
+        })
 
 #if defined(static_assert)
 #define assert_cc(expr)                                                 \

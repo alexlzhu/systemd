@@ -3,7 +3,7 @@
   "http://www.oasis-open.org/docbook/xml/4.2/docbookx.dtd">
 <!-- SPDX-License-Identifier: LGPL-2.1-or-later -->
 
-<refentry id="bootctl" conditional='ENABLE_EFI'
+<refentry id="bootctl" conditional='HAVE_GNU_EFI'
     xmlns:xi="http://www.w3.org/2001/XInclude">
   <refentryinfo>
     <title>bootctl</title>
@@ -258,14 +258,11 @@
       </varlistentry>
 
       <varlistentry>
-        <term><option>--make-machine-id-directory=yes|no|auto</option></term>
+        <term><option>--make-machine-id-directory=yes|no</option></term>
         <listitem><para>Control creation and deletion of the top-level machine ID directory on the file
         system containing boot loader entries (i.e. beneath the file system returned by the
         <option>--print-boot-path</option> option, see above) during <option>install</option> and
-        <option>remove</option>, respectively.  <literal>auto</literal> is equivalent to
-        <literal>yes</literal> if <filename>/etc/machine-id</filename> resides on a filesystem other than
-        tmpfs and <literal>no</literal> otherwise (in the latter case the machine ID is likely transient and
-        hence should not be used persistently in the ESP). Defaults to <literal>auto</literal>. See
+        <option>remove</option>, respectively. Defaults to <literal>no</literal>. See
         <citerefentry><refentrytitle>machine-id</refentrytitle><manvolnum>5</manvolnum></citerefentry> for
         details about the machine ID concept and file.</para>
 
@@ -284,6 +281,14 @@
       <xi:include href="standard-options.xml" xpointer="help"/>
       <xi:include href="standard-options.xml" xpointer="version"/>
     </variablelist>
+  </refsect1>
+
+  <refsect1>
+    <title>Signed .efi files</title>
+    <para><command>bootctl</command> <option>install</option> and <option>update</option> will look for a
+    <command>systemd-boot</command> file ending with the <literal>.efi.signed</literal> suffix first, and copy
+    that instead of the normal <literal>.efi</literal> file. This allows distributions or end-users to provide
+    signed images for UEFI SecureBoot.</para>
   </refsect1>
 
   <refsect1>

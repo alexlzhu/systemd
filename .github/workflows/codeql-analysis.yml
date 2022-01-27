@@ -7,6 +7,12 @@ name: "CodeQL"
 on:
   pull_request:
     branches: [main]
+    paths:
+      - .github/codeql-config.yml
+      - .github/codeql-custom.qls
+      - .github/workflows/codeql-analysis.yml
+      - .github/workflows/requirements.txt
+      - .github/workflows/unit_tests.sh
   # It takes the workflow approximately 30 minutes to analyze the code base
   # so it doesn't seem to make much sense to trigger it on every PR or commit.
   # It runs daily at 01:00 to avoid colliding with the Coverity workflow.
@@ -20,7 +26,6 @@ jobs:
   analyze:
     name: Analyze
     runs-on: ubuntu-latest
-    if: github.event_name == 'schedule' || github.event.pull_request.user.login == 'dependabot[bot]'
     concurrency:
       group: ${{ github.workflow }}-${{ matrix.language }}-${{ github.ref }}
       cancel-in-progress: true
@@ -38,14 +43,15 @@ jobs:
       uses: actions/checkout@ec3a7ce113134d7a93b817d10a8272cb61118579
 
     - name: Initialize CodeQL
-      uses: github/codeql-action/init@5581e08a65fc3811c3ac78939dd59e7a8adbf003
+      uses: github/codeql-action/init@384cfc42b2131df01c009d3d2eed7b78d8e8556e
       with:
         languages: ${{ matrix.language }}
+        config-file: ./.github/codeql-config.yml
 
     - run: sudo -E .github/workflows/unit_tests.sh SETUP
 
     - name: Autobuild
-      uses: github/codeql-action/autobuild@5581e08a65fc3811c3ac78939dd59e7a8adbf003
+      uses: github/codeql-action/autobuild@384cfc42b2131df01c009d3d2eed7b78d8e8556e
 
     - name: Perform CodeQL Analysis
-      uses: github/codeql-action/analyze@5581e08a65fc3811c3ac78939dd59e7a8adbf003
+      uses: github/codeql-action/analyze@384cfc42b2131df01c009d3d2eed7b78d8e8556e

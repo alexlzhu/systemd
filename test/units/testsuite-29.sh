@@ -12,6 +12,11 @@ if [[ -v ASAN_OPTIONS || -v UBSAN_OPTIONS ]]; then
     ARGS+=(--profile=trusted)
 fi
 
+systemd-dissect --no-pager /usr/share/minimal_0.raw | grep -q '✓ portable service'
+systemd-dissect --no-pager /usr/share/minimal_1.raw | grep -q '✓ portable service'
+systemd-dissect --no-pager /usr/share/app0.raw | grep -q '✓ extension for portable service'
+systemd-dissect --no-pager /usr/share/app1.raw | grep -q '✓ extension for portable service'
+
 export SYSTEMD_LOG_LEVEL=debug
 mkdir -p /run/systemd/system/systemd-portabled.service.d/
 cat <<EOF >/run/systemd/system/systemd-portabled.service.d/override.conf
@@ -79,29 +84,47 @@ portablectl list | grep -q -F "No images."
 portablectl "${ARGS[@]}" attach --now --runtime --extension /usr/share/app0.raw /usr/share/minimal_0.raw app0
 
 systemctl is-active app0.service
+status="$(portablectl is-attached --extension app0 minimal_0)"
+[[ "${status}" == "running-runtime" ]]
 
 portablectl "${ARGS[@]}" reattach --now --runtime --extension /usr/share/app0.raw /usr/share/minimal_1.raw app0
 
 systemctl is-active app0.service
+status="$(portablectl is-attached --extension app0 minimal_1)"
+[[ "${status}" == "running-runtime" ]]
 
 portablectl detach --now --runtime --extension /usr/share/app0.raw /usr/share/minimal_1.raw app0
 
 portablectl "${ARGS[@]}" attach --now --runtime --extension /usr/share/app1.raw /usr/share/minimal_0.raw app1
 
 systemctl is-active app1.service
+status="$(portablectl is-attached --extension app1 minimal_0)"
+[[ "${status}" == "running-runtime" ]]
 
 portablectl "${ARGS[@]}" reattach --now --runtime --extension /usr/share/app1.raw /usr/share/minimal_1.raw app1
 
 systemctl is-active app1.service
+status="$(portablectl is-attached --extension app1 minimal_1)"
+[[ "${status}" == "running-runtime" ]]
 
 portablectl detach --now --runtime --extension /usr/share/app1.raw /usr/share/minimal_1.raw app1
 
 # portablectl also works with directory paths rather than images
 
-mkdir /tmp/rootdir /tmp/app1 /tmp/overlay
+mkdir /tmp/rootdir /tmp/app0 /tmp/app1 /tmp/overlay /tmp/os-release-fix /tmp/os-release-fix/etc
+mount /usr/share/app0.raw /tmp/app0
 mount /usr/share/app1.raw /tmp/app1
 mount /usr/share/minimal_0.raw /tmp/rootdir
-mount -t overlay overlay -o lowerdir=/tmp/app1:/tmp/rootdir /tmp/overlay
+
+# Fix up os-release to drop the valid PORTABLE_SERVICES field (because we are
+# bypassing the sysext logic in portabled here it will otherwise not see the
+# extensions additional valid prefix)
+grep -v "^PORTABLE_PREFIXES=" /tmp/rootdir/etc/os-release > /tmp/os-release-fix/etc/os-release
+
+mount -t overlay overlay -o lowerdir=/tmp/os-release-fix:/tmp/app1:/tmp/rootdir /tmp/overlay
+
+grep . /tmp/overlay/usr/lib/extension-release.d/*
+grep . /tmp/overlay/etc/os-release
 
 portablectl "${ARGS[@]}" attach --copy=symlink --now --runtime /tmp/overlay app1
 
@@ -110,7 +133,22 @@ systemctl is-active app1.service
 portablectl detach --now --runtime overlay app1
 
 umount /tmp/overlay
+
+portablectl "${ARGS[@]}" attach --copy=symlink --now --runtime --extension /tmp/app0 --extension /tmp/app1 /tmp/rootdir app0 app1
+
+systemctl is-active app0.service
+systemctl is-active app1.service
+
+portablectl inspect --cat --extension app0 --extension app1 rootdir app0 app1 | grep -q -f /tmp/rootdir/usr/lib/os-release
+portablectl inspect --cat --extension app0 --extension app1 rootdir app0 app1 | grep -q -f /tmp/app0/usr/lib/extension-release.d/extension-release.app0
+portablectl inspect --cat --extension app0 --extension app1 rootdir app0 app1 | grep -q -f /tmp/app1/usr/lib/extension-release.d/extension-release.app2
+portablectl inspect --cat --extension app0 --extension app1 rootdir app0 app1 | grep -q -f /tmp/app1/usr/lib/systemd/system/app1.service
+portablectl inspect --cat --extension app0 --extension app1 rootdir app0 app1 | grep -q -f /tmp/app0/usr/lib/systemd/system/app0.service
+
+portablectl detach --now --runtime --extension /tmp/app0 --extension /tmp/app1 /tmp/rootdir app0 app1
+
 umount /tmp/rootdir
+umount /tmp/app0
 umount /tmp/app1
 
 echo OK >/testok

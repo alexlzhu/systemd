@@ -19,6 +19,7 @@
 #include "string-util.h"
 #include "strv.h"
 #include "vrf.h"
+#include "wireguard.h"
 
 int route_new(Route **ret) {
         _cleanup_(route_freep) Route *route = NULL;
@@ -46,7 +47,7 @@ int route_new(Route **ret) {
 }
 
 static int route_new_static(Network *network, const char *filename, unsigned section_line, Route **ret) {
-        _cleanup_(network_config_section_freep) NetworkConfigSection *n = NULL;
+        _cleanup_(config_section_freep) ConfigSection *n = NULL;
         _cleanup_(route_freep) Route *route = NULL;
         int r;
 
@@ -55,7 +56,7 @@ static int route_new_static(Network *network, const char *filename, unsigned sec
         assert(filename);
         assert(section_line > 0);
 
-        r = network_config_section_new(filename, section_line, &n);
+        r = config_section_new(filename, section_line, &n);
         if (r < 0)
                 return r;
 
@@ -77,7 +78,7 @@ static int route_new_static(Network *network, const char *filename, unsigned sec
         route->section = TAKE_PTR(n);
         route->source = NETWORK_CONFIG_SOURCE_STATIC;
 
-        r = hashmap_ensure_put(&network->routes_by_section, &network_config_hash_ops, route->section, route);
+        r = hashmap_ensure_put(&network->routes_by_section, &config_section_hash_ops, route->section, route);
         if (r < 0)
                 return r;
 
@@ -94,7 +95,7 @@ Route *route_free(Route *route) {
                 hashmap_remove(route->network->routes_by_section, route->section);
         }
 
-        network_config_section_free(route->section);
+        config_section_free(route->section);
 
         if (route->link)
                 set_remove(route->link->routes, route);
@@ -242,7 +243,7 @@ int route_compare_func(const Route *a, const Route *b) {
         }
 }
 
-DEFINE_PRIVATE_HASH_OPS_WITH_KEY_DESTRUCTOR(
+DEFINE_HASH_OPS_WITH_KEY_DESTRUCTOR(
                 route_hash_ops,
                 Route,
                 route_hash_func,
@@ -557,10 +558,10 @@ static void log_route_debug(const Route *route, const char *str, const Link *lin
                 return;
 
         (void) network_config_state_to_string_alloc(route->state, &state);
-        if (in_addr_is_set(route->family, &route->dst))
+        if (in_addr_is_set(route->family, &route->dst) || route->dst_prefixlen > 0)
                 (void) in_addr_prefix_to_string(route->family, &route->dst, route->dst_prefixlen, &dst);
-        if (in_addr_is_set(route->family, &route->src))
-                (void) in_addr_to_string(route->family, &route->src, &src);
+        if (in_addr_is_set(route->family, &route->src) || route->src_prefixlen > 0)
+                (void) in_addr_prefix_to_string(route->family, &route->src, route->src_prefixlen, &src);
         if (in_addr_is_set(route->gw_family, &route->gw)) {
                 (void) in_addr_to_string(route->gw_family, &route->gw, &gw_alloc);
                 gw = gw_alloc;
@@ -616,7 +617,7 @@ static int route_set_netlink_message(const Route *route, sd_netlink_message *req
                 if (route->gw_family == route->family) {
                         r = netlink_message_append_in_addr_union(req, RTA_GATEWAY, route->gw_family, &route->gw);
                         if (r < 0)
-                                return log_link_error_errno(link, r, "Could not append RTA_GATEWAY attribute: %m");
+                                return r;
                 } else {
                         RouteVia rtvia = {
                                 .family = route->gw_family,
@@ -625,57 +626,57 @@ static int route_set_netlink_message(const Route *route, sd_netlink_message *req
 
                         r = sd_netlink_message_append_data(req, RTA_VIA, &rtvia, sizeof(rtvia));
                         if (r < 0)
-                                return log_link_error_errno(link, r, "Could not append RTA_VIA attribute: %m");
+                                return r;
                 }
         }
 
         if (route->dst_prefixlen > 0) {
                 r = netlink_message_append_in_addr_union(req, RTA_DST, route->family, &route->dst);
                 if (r < 0)
-                        return log_link_error_errno(link, r, "Could not append RTA_DST attribute: %m");
+                        return r;
 
                 r = sd_rtnl_message_route_set_dst_prefixlen(req, route->dst_prefixlen);
                 if (r < 0)
-                        return log_link_error_errno(link, r, "Could not set destination prefix length: %m");
+                        return r;
         }
 
         if (route->src_prefixlen > 0) {
                 r = netlink_message_append_in_addr_union(req, RTA_SRC, route->family, &route->src);
                 if (r < 0)
-                        return log_link_error_errno(link, r, "Could not append RTA_SRC attribute: %m");
+                        return r;
 
                 r = sd_rtnl_message_route_set_src_prefixlen(req, route->src_prefixlen);
                 if (r < 0)
-                        return log_link_error_errno(link, r, "Could not set source prefix length: %m");
+                        return r;
         }
 
         if (in_addr_is_set(route->family, &route->prefsrc)) {
                 r = netlink_message_append_in_addr_union(req, RTA_PREFSRC, route->family, &route->prefsrc);
                 if (r < 0)
-                        return log_link_error_errno(link, r, "Could not append RTA_PREFSRC attribute: %m");
+                        return r;
         }
 
         r = sd_rtnl_message_route_set_scope(req, route->scope);
         if (r < 0)
-                return log_link_error_errno(link, r, "Could not set scope: %m");
+                return r;
 
         r = sd_rtnl_message_route_set_flags(req, route->flags & RTNH_F_ONLINK);
         if (r < 0)
-                return log_link_error_errno(link, r, "Could not set flags: %m");
+                return r;
 
         if (route->table < 256) {
                 r = sd_rtnl_message_route_set_table(req, route->table);
                 if (r < 0)
-                        return log_link_error_errno(link, r, "Could not set route table: %m");
+                        return r;
         } else {
                 r = sd_rtnl_message_route_set_table(req, RT_TABLE_UNSPEC);
                 if (r < 0)
-                        return log_link_error_errno(link, r, "Could not set route table: %m");
+                        return r;
 
                 /* Table attribute to allow more than 256. */
-                r = sd_netlink_message_append_data(req, RTA_TABLE, &route->table, sizeof(route->table));
+                r = sd_netlink_message_append_u32(req, RTA_TABLE, route->table);
                 if (r < 0)
-                        return log_link_error_errno(link, r, "Could not append RTA_TABLE attribute: %m");
+                        return r;
         }
 
         if (!route_type_is_reject(route) &&
@@ -685,22 +686,22 @@ static int route_set_netlink_message(const Route *route, sd_netlink_message *req
 
                 r = sd_netlink_message_append_u32(req, RTA_OIF, link->ifindex);
                 if (r < 0)
-                        return log_link_error_errno(link, r, "Could not append RTA_OIF attribute: %m");
+                        return r;
         }
 
         if (route->nexthop_id > 0) {
                 r = sd_netlink_message_append_u32(req, RTA_NH_ID, route->nexthop_id);
                 if (r < 0)
-                        return log_link_error_errno(link, r, "Could not append RTA_NH_ID attribute: %m");
+                        return r;
         }
 
         r = sd_netlink_message_append_u8(req, RTA_PREF, route->pref);
         if (r < 0)
-                return log_link_error_errno(link, r, "Could not append RTA_PREF attribute: %m");
+                return r;
 
         r = sd_netlink_message_append_u32(req, RTA_PRIORITY, route->priority);
         if (r < 0)
-                return log_link_error_errno(link, r, "Could not append RTA_PRIORITY attribute: %m");
+                return r;
 
         return 0;
 }
@@ -742,7 +743,7 @@ int route_remove(Route *route) {
                                       RTM_DELROUTE, route->family,
                                       route->protocol);
         if (r < 0)
-                return log_link_error_errno(link, r, "Could not create RTM_DELROUTE message: %m");
+                return log_link_error_errno(link, r, "Could not create netlink message: %m");
 
         if (route->family == AF_INET && route->nexthop_id > 0 && route->type == RTN_BLACKHOLE)
                 /* When IPv4 route has nexthop id and the nexthop type is blackhole, even though kernel
@@ -761,12 +762,12 @@ int route_remove(Route *route) {
 
         r = route_set_netlink_message(route, req, link);
         if (r < 0)
-                return r;
+                return log_error_errno(r, "Could not fill netlink message: %m");
 
         r = netlink_call_async(manager->rtnl, NULL, req, route_remove_handler,
                                link ? link_netlink_destroy_callback : NULL, link);
         if (r < 0)
-                return log_link_error_errno(link, r, "Could not send rtnetlink message: %m");
+                return log_link_error_errno(link, r, "Could not send netlink message: %m");
 
         link_ref(link);
 
@@ -789,6 +790,10 @@ static void manager_mark_routes(Manager *manager, bool foreign, const Link *exce
 
                 /* When 'foreign' is true, do not remove routes we configured. */
                 if (foreign && route->source != NETWORK_CONFIG_SOURCE_FOREIGN)
+                        continue;
+
+                /* Do not touch dynamic routes. They will removed by dhcp_pd_prefix_lost() */
+                if (IN_SET(route->source, NETWORK_CONFIG_SOURCE_DHCP4, NETWORK_CONFIG_SOURCE_DHCP6))
                         continue;
 
                 /* Ignore routes not assigned yet or already removed. */
@@ -853,9 +858,8 @@ static bool route_by_kernel(const Route *route) {
         if (route->protocol == RTPROT_KERNEL)
                 return true;
 
-        /* Do not touch multicast route added by kernel. See issue #6088.
-         * TODO: Why the kernel adds this route with protocol RTPROT_BOOT?
-         * https://tools.ietf.org/html/rfc4862#section-5.4 may explain why. */
+        /* The kernels older than a826b04303a40d52439aa141035fca5654ccaccd (v5.11) create the IPv6
+         * multicast with RTPROT_BOOT. Do not touch it. */
         if (route->protocol == RTPROT_BOOT &&
             route->family == AF_INET6 &&
             route->dst_prefixlen == 8 &&
@@ -865,12 +869,35 @@ static bool route_by_kernel(const Route *route) {
         return false;
 }
 
+static void link_unmark_wireguard_routes(Link *link) {
+        Route *route, *existing;
+        NetDev *netdev;
+        Wireguard *w;
+
+        assert(link);
+
+        if (!streq_ptr(link->kind, "wireguard"))
+                return;
+
+        if (netdev_get(link->manager, link->ifname, &netdev) < 0)
+                return;
+
+        w = WIREGUARD(netdev);
+        if (!w)
+                return;
+
+        SET_FOREACH(route, w->routes)
+                if (route_get(NULL, link, route, &existing) >= 0)
+                        route_unmark(existing);
+}
+
 int link_drop_foreign_routes(Link *link) {
         Route *route;
         int k, r;
 
         assert(link);
         assert(link->manager);
+        assert(link->network);
 
         SET_FOREACH(route, link->routes) {
                 /* do not touch routes managed by the kernel */
@@ -885,11 +912,11 @@ int link_drop_foreign_routes(Link *link) {
                 if (!route_exists(route))
                         continue;
 
-                if (route->protocol == RTPROT_STATIC && link->network &&
+                if (route->protocol == RTPROT_STATIC &&
                     FLAGS_SET(link->network->keep_configuration, KEEP_CONFIGURATION_STATIC))
                         continue;
 
-                if (route->protocol == RTPROT_DHCP && link->network &&
+                if (route->protocol == RTPROT_DHCP &&
                     FLAGS_SET(link->network->keep_configuration, KEEP_CONFIGURATION_DHCP))
                         continue;
 
@@ -913,6 +940,8 @@ int link_drop_foreign_routes(Link *link) {
                         if (route_get(NULL, link, converted->routes[i], &existing) >= 0)
                                 route_unmark(existing);
         }
+
+        link_unmark_wireguard_routes(link);
 
         r = 0;
         SET_FOREACH(route, link->routes) {
@@ -981,15 +1010,19 @@ void link_foreignize_routes(Link *link) {
 
 static int route_expire_handler(sd_event_source *s, uint64_t usec, void *userdata) {
         Route *route = userdata;
+        Link *link;
         int r;
 
         assert(route);
-        assert(route->link);
+        assert(route->manager || (route->link && route->link->manager));
+
+        link = route->link; /* This may be NULL. */
 
         r = route_remove(route);
         if (r < 0) {
-                log_link_warning_errno(route->link, r, "Could not remove route: %m");
-                link_enter_failed(route->link);
+                log_link_warning_errno(link, r, "Could not remove route: %m");
+                if (link)
+                        link_enter_failed(link);
         }
 
         return 1;
@@ -1146,7 +1179,7 @@ static int route_configure(
                                       RTM_NEWROUTE, route->family,
                                       route->protocol);
         if (r < 0)
-                return log_link_error_errno(link, r, "Could not create RTM_NEWROUTE message: %m");
+                return log_link_error_errno(link, r, "Could not create netlink message: %m");
 
         r = sd_rtnl_message_route_set_type(req, route->type);
         if (r < 0)
@@ -1154,7 +1187,7 @@ static int route_configure(
 
         r = route_set_netlink_message(route, req, link);
         if (r < 0)
-                return r;
+                return log_error_errno(r, "Could not fill netlink message: %m");
 
         if (route->lifetime_usec != USEC_INFINITY) {
                 r = sd_netlink_message_append_u32(req, RTA_EXPIRES,
@@ -1231,24 +1264,25 @@ static int route_configure(
         return 0;
 }
 
-void route_cancel_request(Route *route) {
+void route_cancel_request(Route *route, Link *link) {
         Request req;
 
         assert(route);
 
+        link = route->link ?: link;
+
+        assert(link);
+
         if (!route_is_requesting(route))
                 return;
 
-        if (!route->link)
-                return;
-
         req = (Request) {
-                .link = route->link,
+                .link = link,
                 .type = REQUEST_TYPE_ROUTE,
                 .route = route,
         };
 
-        request_drop(ordered_set_get(route->link->manager->request_queue, &req));
+        request_drop(ordered_set_get(link->manager->request_queue, &req));
         route_cancel_requesting(route);
 }
 
@@ -1312,6 +1346,16 @@ int link_request_route(
                 existing->lifetime_usec = route->lifetime_usec;
                 if (consume_object)
                         route_free(route);
+
+                if (existing->expire) {
+                        /* When re-configuring an existing route, kernel does not send RTM_NEWROUTE
+                         * message, so we need to update the timer here. */
+                        r = route_setup_timer(existing, NULL);
+                        if (r < 0)
+                                log_link_warning_errno(link, r, "Failed to update expiration timer for route, ignoring: %m");
+                        if (r > 0)
+                                log_route_debug(existing, "Updated expiration timer for", link, link->manager);
+                }
         }
 
         log_route_debug(existing, "Requesting", link, link->manager);
@@ -1338,6 +1382,36 @@ static int link_request_static_route(Link *link, Route *route) {
                                   &link->static_route_messages, static_route_handler, NULL);
 }
 
+static int link_request_wireguard_routes(Link *link, bool only_ipv4) {
+        NetDev *netdev;
+        Wireguard *w;
+        Route *route;
+        int r;
+
+        assert(link);
+
+        if (!streq_ptr(link->kind, "wireguard"))
+                return 0;
+
+        if (netdev_get(link->manager, link->ifname, &netdev) < 0)
+                return 0;
+
+        w = WIREGUARD(netdev);
+        if (!w)
+                return 0;
+
+        SET_FOREACH(route, w->routes) {
+                if (only_ipv4 && route->family != AF_INET)
+                        continue;
+
+                r = link_request_static_route(link, route);
+                if (r < 0)
+                        return r;
+        }
+
+        return 0;
+}
+
 int link_request_static_routes(Link *link, bool only_ipv4) {
         Route *route;
         int r;
@@ -1358,6 +1432,10 @@ int link_request_static_routes(Link *link, bool only_ipv4) {
                 if (r < 0)
                         return r;
         }
+
+        r = link_request_wireguard_routes(link, only_ipv4);
+        if (r < 0)
+                return r;
 
         if (link->static_route_messages == 0) {
                 link->static_routes_configured = true;
@@ -1582,7 +1660,6 @@ int manager_rtnl_process_route(sd_netlink *rtnl, sd_netlink_message *message, Ma
         Link *link = NULL;
         uint32_t ifindex;
         uint16_t type;
-        unsigned char table;
         size_t rta_len;
         int r;
 
@@ -1719,12 +1796,18 @@ int manager_rtnl_process_route(sd_netlink *rtnl, sd_netlink_message *message, Ma
                 return 0;
         }
 
-        r = sd_rtnl_message_route_get_table(message, &table);
+        r = sd_netlink_message_read_u32(message, RTA_TABLE, &tmp->table);
+        if (r == -ENODATA) {
+                unsigned char table;
+
+                r = sd_rtnl_message_route_get_table(message, &table);
+                if (r >= 0)
+                        tmp->table = table;
+        }
         if (r < 0) {
                 log_link_warning_errno(link, r, "rtnl: received route message with invalid table, ignoring: %m");
                 return 0;
         }
-        tmp->table = table;
 
         r = sd_netlink_message_read_u32(message, RTA_PRIORITY, &tmp->priority);
         if (r < 0 && r != -ENODATA) {
@@ -2054,6 +2137,8 @@ int config_parse_destination(
                            "Invalid %s='%s', ignoring assignment: %m", lvalue, rvalue);
                 return 0;
         }
+
+        (void) in_addr_mask(n->family, buffer, *prefixlen);
 
         TAKE_PTR(n);
         return 0;
@@ -2760,6 +2845,12 @@ static int route_section_verify(Route *route, Network *network) {
                 if (IN_SET(route->type, RTN_LOCAL, RTN_NAT))
                         route->scope = RT_SCOPE_HOST;
                 else if (IN_SET(route->type, RTN_BROADCAST, RTN_ANYCAST, RTN_MULTICAST))
+                        route->scope = RT_SCOPE_LINK;
+                else if (IN_SET(route->type, RTN_UNICAST, RTN_UNSPEC) &&
+                         !route->gateway_from_dhcp_or_ra &&
+                         !in_addr_is_set(route->gw_family, &route->gw) &&
+                         ordered_set_isempty(route->multipath_routes) &&
+                         route->nexthop_id == 0)
                         route->scope = RT_SCOPE_LINK;
         }
 

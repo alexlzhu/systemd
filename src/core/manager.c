@@ -287,7 +287,6 @@ static void manager_print_jobs_in_progress(Manager *m) {
 
 static int have_ask_password(void) {
         _cleanup_closedir_ DIR *dir = NULL;
-        struct dirent *de;
 
         dir = opendir("/run/systemd/ask-password");
         if (!dir) {
@@ -297,10 +296,9 @@ static int have_ask_password(void) {
                         return -errno;
         }
 
-        FOREACH_DIRENT_ALL(de, dir, return -errno) {
+        FOREACH_DIRENT_ALL(de, dir, return -errno)
                 if (startswith(de->d_name, "ask."))
                         return true;
-        }
         return false;
 }
 
@@ -935,7 +933,7 @@ int manager_new(UnitFileScope scope, ManagerTestRunFlags test_run_flags, Manager
                 if (MANAGER_IS_SYSTEM(m) && lsm_bpf_supported()) {
                         r = lsm_bpf_setup(m);
                         if (r < 0)
-                                return r;
+                                log_warning_errno(r, "Failed to setup LSM BPF, ignoring: %m");
                 }
 #endif
         }
@@ -1729,13 +1727,21 @@ static void manager_ready(Manager *m) {
         /* Let's finally catch up with any changes that took place while we were reloading/reexecing */
         manager_catchup(m);
 
+        /* Create a file which will indicate when the manager started loading units the last time. */
+        if (MANAGER_IS_SYSTEM(m))
+                (void) touch_file("/run/systemd/systemd-units-load", false,
+                        m->timestamps[MANAGER_TIMESTAMP_UNITS_LOAD].realtime ?: now(CLOCK_REALTIME),
+                        UID_INVALID, GID_INVALID, 0444);
+
         m->honor_device_enumeration = true;
 }
 
 Manager* manager_reloading_start(Manager *m) {
         m->n_reloading++;
+        dual_timestamp_get(m->timestamps + MANAGER_TIMESTAMP_UNITS_LOAD);
         return m;
 }
+
 void manager_reloading_stopp(Manager **m) {
         if (*m) {
                 assert((*m)->n_reloading > 0);
@@ -2445,18 +2451,19 @@ static int manager_dispatch_notify_fd(sd_event_source *source, int fd, uint32_t 
         }
 
         n = recvmsg_safe(m->notify_fd, &msghdr, MSG_DONTWAIT|MSG_CMSG_CLOEXEC|MSG_TRUNC);
-        if (IN_SET(n, -EAGAIN, -EINTR))
-                return 0; /* Spurious wakeup, try again */
-        if (n == -EXFULL) {
-                log_warning("Got message with truncated control data (too many fds sent?), ignoring.");
-                return 0;
-        }
-        if (n < 0)
+        if (n < 0) {
+                if (ERRNO_IS_TRANSIENT(n))
+                        return 0; /* Spurious wakeup, try again */
+                if (n == -EXFULL) {
+                        log_warning("Got message with truncated control data (too many fds sent?), ignoring.");
+                        return 0;
+                }
                 /* If this is any other, real error, then let's stop processing this socket. This of course
                  * means we won't take notification messages anymore, but that's still better than busy
                  * looping around this: being woken up over and over again but being unable to actually read
                  * the message off the socket. */
                 return log_error_errno(n, "Failed to receive notification message: %m");
+        }
 
         CMSG_FOREACH(cmsg, &msghdr) {
                 if (cmsg->cmsg_level == SOL_SOCKET && cmsg->cmsg_type == SCM_RIGHTS) {
@@ -2716,18 +2723,17 @@ static int manager_dispatch_signal_fd(sd_event_source *source, int fd, uint32_t 
         }
 
         n = read(m->signal_fd, &sfsi, sizeof(sfsi));
-        if (n != sizeof(sfsi)) {
-                if (n >= 0) {
-                        log_warning("Truncated read from signal fd (%zu bytes), ignoring!", n);
-                        return 0;
-                }
-
-                if (IN_SET(errno, EINTR, EAGAIN))
+        if (n < 0) {
+                if (ERRNO_IS_TRANSIENT(errno))
                         return 0;
 
                 /* We return an error here, which will kill this handler,
                  * to avoid a busy loop on read error. */
                 return log_error_errno(errno, "Reading from signal fd failed: %m");
+        }
+        if (n != sizeof(sfsi)) {
+                log_warning("Truncated read from signal fd (%zu bytes), ignoring!", n);
+                return 0;
         }
 
         log_received_signal(sfsi.ssi_signo == SIGCHLD ||
@@ -3233,15 +3239,15 @@ void manager_set_watchdog(Manager *m, WatchdogType t, usec_t timeout) {
         m->watchdog[t] = timeout;
 }
 
-int manager_override_watchdog(Manager *m, WatchdogType t, usec_t timeout) {
+void manager_override_watchdog(Manager *m, WatchdogType t, usec_t timeout) {
 
         assert(m);
 
         if (MANAGER_IS_USER(m))
-                return 0;
+                return;
 
         if (m->watchdog_overridden[t] == timeout)
-                return 0;
+                return;
 
         if (t == WATCHDOG_RUNTIME) {
                 usec_t usec = timestamp_is_set(timeout) ? timeout : m->watchdog[t];
@@ -3250,7 +3256,6 @@ int manager_override_watchdog(Manager *m, WatchdogType t, usec_t timeout) {
         }
 
         m->watchdog_overridden[t] = timeout;
-        return 0;
 }
 
 int manager_reload(Manager *m) {
@@ -3551,13 +3556,13 @@ void manager_check_finished(Manager *m) {
 
         manager_send_ready(m);
 
+        /* Notify Type=idle units that we are done now */
+        manager_close_idle_pipe(m);
+
         if (MANAGER_IS_FINISHED(m))
                 return;
 
         manager_flip_auto_status(m, false, "boot finished");
-
-        /* Notify Type=idle units that we are done now */
-        manager_close_idle_pipe(m);
 
         /* Turn off confirm spawn now */
         m->confirm_spawn = NULL;
@@ -4263,7 +4268,7 @@ int manager_dispatch_user_lookup_fd(sd_event_source *source, int fd, uint32_t re
 
         l = recv(fd, &buffer, sizeof(buffer), MSG_DONTWAIT);
         if (l < 0) {
-                if (IN_SET(errno, EINTR, EAGAIN))
+                if (ERRNO_IS_TRANSIENT(errno))
                         return 0;
 
                 return log_error_errno(errno, "Failed to read from user lookup fd: %m");
@@ -4459,6 +4464,7 @@ static const char *const manager_timestamp_table[_MANAGER_TIMESTAMP_MAX] = {
         [MANAGER_TIMESTAMP_GENERATORS_FINISH]        = "generators-finish",
         [MANAGER_TIMESTAMP_UNITS_LOAD_START]         = "units-load-start",
         [MANAGER_TIMESTAMP_UNITS_LOAD_FINISH]        = "units-load-finish",
+        [MANAGER_TIMESTAMP_UNITS_LOAD]               = "units-load",
         [MANAGER_TIMESTAMP_INITRD_SECURITY_START]    = "initrd-security-start",
         [MANAGER_TIMESTAMP_INITRD_SECURITY_FINISH]   = "initrd-security-finish",
         [MANAGER_TIMESTAMP_INITRD_GENERATORS_START]  = "initrd-generators-start",

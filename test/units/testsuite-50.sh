@@ -92,15 +92,26 @@ elif [ "${machine}" = "arm" ]; then
     verity_guid=7386cdf2-203c-47a9-a498-f2ecce45a2d6
     signature_guid=42b0455f-eb11-491d-98d3-56145ba9d037
     architecture="arm"
+elif [ "${machine}" = "loongarch64" ]; then
+    root_guid=77055800-792c-4f94-b39a-98c91b762bb6
+    verity_guid=f3393b22-e9af-4613-a948-9d3bfbd0c535
+    signature_guid=5afb67eb-ecc8-4f85-ae8e-ac1e7c50e7d0
+    architecture="loongarch64"
 elif [ "${machine}" = "ia64" ]; then
     root_guid=993d8d3d-f80e-4225-855a-9daf8ed7ea97
     verity_guid=86ed10d5-b607-45bb-8957-d350f23d0571
     signature_guid=e98b36ee-32ba-4882-9b12-0ce14655f46a
     architecture="ia64"
+elif [ "${machine}" = "s390x" ]; then
+    root_guid=5eead9a9-fe09-4a1e-a1d7-520d00531306
+    verity_guid=b325bfbe-c7be-4ab8-8357-139e652d2f6b
+    signature_guid=c80187a5-73a3-491a-901a-017c3fa953e9
+    architecture="s390x"
 elif [ "${machine}" = "ppc64le" ]; then
-    # There's no support of PPC in the discoverable partitions specification yet, so skip the rest for now
-    echo OK >/testok
-    exit 0
+    root_guid=c31c45e6-3f39-412e-80fb-4809c4980599
+    verity_guid=906bd944-4589-4aae-a4e4-dd983917446a
+    signature_guid=d4a236e7-e873-4c07-bf1d-bf6cf7f1c3c6
+    architecture="ppc64-le"
 else
     echo "Unexpected uname -m: ${machine} in testsuite-50.sh, please fix me"
     exit 1
@@ -123,6 +134,13 @@ signature_size="$((signature_size * 2))KiB"
 
 HAVE_OPENSSL=0
 if systemctl --version | grep -q -- +OPENSSL ; then
+    # The openssl binary is installed conditionally.
+    # If we have OpenSSL support enabled and openssl is missing, fail early
+    # with a proper error message.
+    if ! command -v openssl >/dev/null 2>&1; then
+        echo "openssl missing" >/failed
+        exit 1
+    fi
     HAVE_OPENSSL=1
     # Unfortunately OpenSSL insists on reading some config file, hence provide one with mostly placeholder contents
     cat >> "${image}.openssl.cnf" <<EOF
@@ -302,6 +320,36 @@ RemainAfterExit=yes
 EOF
 systemctl start testservice-50e.service
 systemctl is-active testservice-50e.service
+
+# ExtensionDirectories will set up an overlay
+mkdir -p "${image_dir}/app0" "${image_dir}/app1"
+systemd-run -P --property ExtensionDirectories="${image_dir}/nonexistant" --property RootImage="${image}.raw" cat /opt/script0.sh && { echo 'unexpected success'; exit 1; }
+systemd-run -P --property ExtensionDirectories="${image_dir}/app0" --property RootImage="${image}.raw" cat /opt/script0.sh && { echo 'unexpected success'; exit 1; }
+systemd-dissect --mount /usr/share/app0.raw "${image_dir}/app0"
+systemd-dissect --mount /usr/share/app1.raw "${image_dir}/app1"
+systemd-run -P --property ExtensionDirectories="${image_dir}/app0" --property RootImage="${image}.raw" cat /opt/script0.sh | grep -q -F "extension-release.app0"
+systemd-run -P --property ExtensionDirectories="${image_dir}/app0" --property RootImage="${image}.raw" cat /usr/lib/systemd/system/some_file | grep -q -F "MARKER=1"
+systemd-run -P --property ExtensionDirectories="${image_dir}/app0 ${image_dir}/app1" --property RootImage="${image}.raw" cat /opt/script0.sh | grep -q -F "extension-release.app0"
+systemd-run -P --property ExtensionDirectories="${image_dir}/app0 ${image_dir}/app1" --property RootImage="${image}.raw" cat /usr/lib/systemd/system/some_file | grep -q -F "MARKER=1"
+systemd-run -P --property ExtensionDirectories="${image_dir}/app0 ${image_dir}/app1" --property RootImage="${image}.raw" cat /opt/script1.sh | grep -q -F "extension-release.app2"
+systemd-run -P --property ExtensionDirectories="${image_dir}/app0 ${image_dir}/app1" --property RootImage="${image}.raw" cat /usr/lib/systemd/system/other_file | grep -q -F "MARKER=1"
+cat >/run/systemd/system/testservice-50f.service <<EOF
+[Service]
+MountAPIVFS=yes
+TemporaryFileSystem=/run
+RootImage=${image}.raw
+ExtensionDirectories=${image_dir}/app0 ${image_dir}/app1
+# Relevant only for sanitizer runs
+UnsetEnvironment=LD_PRELOAD
+ExecStart=/bin/bash -c '/opt/script0.sh | grep ID'
+ExecStart=/bin/bash -c '/opt/script1.sh | grep ID'
+Type=oneshot
+RemainAfterExit=yes
+EOF
+systemctl start testservice-50f.service
+systemctl is-active testservice-50f.service
+umount "${image_dir}/app0"
+umount "${image_dir}/app1"
 
 echo OK >/testok
 

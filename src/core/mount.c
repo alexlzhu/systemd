@@ -84,14 +84,6 @@ static MountParameters* get_mount_parameters(Mount *m) {
         return get_mount_parameters_fragment(m);
 }
 
-static bool mount_is_automount(const MountParameters *p) {
-        assert(p);
-
-        return fstab_test_option(p->options,
-                                 "comment=systemd.automount\0"
-                                 "x-systemd.automount\0");
-}
-
 static bool mount_is_network(const MountParameters *p) {
         assert(p);
 
@@ -179,6 +171,7 @@ static bool mount_needs_quota(const MountParameters *p) {
 static void mount_init(Unit *u) {
         Mount *m = MOUNT(u);
 
+        assert(m);
         assert(u);
         assert(u->load_state == UNIT_STUB);
 
@@ -483,7 +476,7 @@ static int mount_add_default_ordering_dependencies(
                 before = SPECIAL_LOCAL_FS_TARGET;
         }
 
-        if (!mount_is_nofail(m) && !mount_is_automount(p)) {
+        if (!mount_is_nofail(m)) {
                 r = unit_add_dependency_by_name(UNIT(m), UNIT_BEFORE, before, true, mask);
                 if (r < 0)
                         return r;
@@ -681,6 +674,7 @@ static int mount_load(Unit *u) {
         Mount *m = MOUNT(u);
         int r, q = 0;
 
+        assert(m);
         assert(u);
         assert(u->load_state == UNIT_STUB);
 
@@ -1256,6 +1250,7 @@ static int mount_deserialize_item(Unit *u, const char *key, const char *value, F
         Mount *m = MOUNT(u);
         int r;
 
+        assert(m);
         assert(u);
         assert(key);
         assert(value);
@@ -1794,6 +1789,9 @@ static int mount_get_timeout(Unit *u, usec_t *timeout) {
         usec_t t;
         int r;
 
+        assert(m);
+        assert(u);
+
         if (!m->timer_event_source)
                 return 0;
 
@@ -1840,8 +1838,17 @@ static bool mount_is_mounted(Mount *m) {
 
 static int mount_on_ratelimit_expire(sd_event_source *s, void *userdata) {
         Manager *m = userdata;
+        Job *j;
 
         assert(m);
+
+        /* Let's enqueue all start jobs that were previously skipped because of active ratelimit. */
+        HASHMAP_FOREACH(j, m->jobs) {
+                if (j->unit->type != UNIT_MOUNT)
+                        continue;
+
+                job_add_to_run_queue(j);
+        }
 
         /* By entering ratelimited state we made all mount start jobs not runnable, now rate limit is over so
          * let's make sure we dispatch them in the next iteration. */

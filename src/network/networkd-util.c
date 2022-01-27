@@ -17,32 +17,33 @@ static const char * const network_config_source_table[_NETWORK_CONFIG_SOURCE_MAX
         [NETWORK_CONFIG_SOURCE_IPV4LL]  = "IPv4LL",
         [NETWORK_CONFIG_SOURCE_DHCP4]   = "DHCPv4",
         [NETWORK_CONFIG_SOURCE_DHCP6]   = "DHCPv6",
-        [NETWORK_CONFIG_SOURCE_DHCP6PD] = "DHCPv6-PD",
+        [NETWORK_CONFIG_SOURCE_DHCP_PD] = "DHCP-PD",
         [NETWORK_CONFIG_SOURCE_NDISC]   = "NDisc",
+        [NETWORK_CONFIG_SOURCE_RUNTIME] = "runtime",
 };
 
 DEFINE_STRING_TABLE_LOOKUP_TO_STRING(network_config_source, NetworkConfigSource);
 
 int network_config_state_to_string_alloc(NetworkConfigState s, char **ret) {
-        static const struct {
-                NetworkConfigState state;
-                const char *str;
-        } map[] = {
-                { .state = NETWORK_CONFIG_STATE_PROBING,     .str = "probing",     },
-                { .state = NETWORK_CONFIG_STATE_REQUESTING,  .str = "requesting",  },
-                { .state = NETWORK_CONFIG_STATE_CONFIGURING, .str = "configuring", },
-                { .state = NETWORK_CONFIG_STATE_CONFIGURED,  .str = "configured",  },
-                { .state = NETWORK_CONFIG_STATE_MARKED,      .str = "marked",      },
-                { .state = NETWORK_CONFIG_STATE_REMOVING,    .str = "removing",    },
+        static const char* states[] = {
+                [LOG2U(NETWORK_CONFIG_STATE_PROBING)]     = "probing",
+                [LOG2U(NETWORK_CONFIG_STATE_REQUESTING)]  = "requesting",
+                [LOG2U(NETWORK_CONFIG_STATE_CONFIGURING)] = "configuring",
+                [LOG2U(NETWORK_CONFIG_STATE_CONFIGURED)]  = "configured",
+                [LOG2U(NETWORK_CONFIG_STATE_MARKED)]      = "marked",
+                [LOG2U(NETWORK_CONFIG_STATE_REMOVING)]    = "removing",
         };
         _cleanup_free_ char *buf = NULL;
 
         assert(ret);
 
-        for (size_t i = 0; i < ELEMENTSOF(map); i++)
-                if (FLAGS_SET(s, map[i].state) &&
-                    !strextend_with_separator(&buf, ",", map[i].str))
-                        return -ENOMEM;
+        for (size_t i = 0; i < ELEMENTSOF(states); i++)
+                if (FLAGS_SET(s, 1 << i)) {
+                        assert(states[i]);
+
+                        if (!strextend_with_separator(&buf, ",", states[i]))
+                                return -ENOMEM;
+                }
 
         *ret = TAKE_PTR(buf);
         return 0;
@@ -240,50 +241,6 @@ int config_parse_mud_url(
         }
 
         return free_and_replace(*url, unescaped);
-}
-
-static void network_config_hash_func(const NetworkConfigSection *c, struct siphash *state) {
-        siphash24_compress_string(c->filename, state);
-        siphash24_compress(&c->line, sizeof(c->line), state);
-}
-
-static int network_config_compare_func(const NetworkConfigSection *x, const NetworkConfigSection *y) {
-        int r;
-
-        r = strcmp(x->filename, y->filename);
-        if (r != 0)
-                return r;
-
-        return CMP(x->line, y->line);
-}
-
-DEFINE_HASH_OPS(network_config_hash_ops, NetworkConfigSection, network_config_hash_func, network_config_compare_func);
-
-int network_config_section_new(const char *filename, unsigned line, NetworkConfigSection **s) {
-        NetworkConfigSection *cs;
-
-        cs = malloc0(offsetof(NetworkConfigSection, filename) + strlen(filename) + 1);
-        if (!cs)
-                return -ENOMEM;
-
-        strcpy(cs->filename, filename);
-        cs->line = line;
-
-        *s = TAKE_PTR(cs);
-
-        return 0;
-}
-
-unsigned hashmap_find_free_section_line(Hashmap *hashmap) {
-        NetworkConfigSection *cs;
-        unsigned n = 0;
-        void *entry;
-
-        HASHMAP_FOREACH_KEY(entry, cs, hashmap)
-                if (n < cs->line)
-                        n = cs->line;
-
-        return n + 1;
 }
 
 int log_link_message_full_errno(Link *link, sd_netlink_message *m, int level, int err, const char *msg) {

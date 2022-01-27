@@ -17,7 +17,7 @@ typedef struct Request Request;
 typedef struct RoutingPolicyRule {
         Manager *manager;
         Network *network;
-        NetworkConfigSection *section;
+        ConfigSection *section;
         NetworkConfigSource source;
         NetworkConfigState state;
 
@@ -53,6 +53,8 @@ typedef struct RoutingPolicyRule {
         int suppress_prefixlen;
         int32_t suppress_ifgroup;
 } RoutingPolicyRule;
+
+const char *fr_act_type_full_to_string(int t) _const_;
 
 RoutingPolicyRule *routing_policy_rule_free(RoutingPolicyRule *rule);
 

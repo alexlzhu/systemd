@@ -174,18 +174,16 @@ EFI_STATUS efivar_get(const EFI_GUID *vendor, const CHAR16 *name, CHAR16 **value
                 return EFI_SUCCESS;
 
         /* Return buffer directly if it happens to be NUL terminated already */
-        if (size >= sizeof(CHAR16) && buf[size/sizeof(CHAR16)] == 0) {
+        if (size >= sizeof(CHAR16) && buf[size / sizeof(CHAR16) - 1] == 0) {
                 *value = TAKE_PTR(buf);
                 return EFI_SUCCESS;
         }
 
         /* Make sure a terminating NUL is available at the end */
-        val = AllocatePool(size + sizeof(CHAR16));
-        if (!val)
-                return EFI_OUT_OF_RESOURCES;
+        val = xallocate_pool(size + sizeof(CHAR16));
 
         CopyMem(val, buf, size);
-        val[size / sizeof(CHAR16)] = 0; /* NUL terminate */
+        val[size / sizeof(CHAR16) - 1] = 0; /* NUL terminate */
 
         *value = val;
         return EFI_SUCCESS;
@@ -256,9 +254,7 @@ EFI_STATUS efivar_get_raw(const EFI_GUID *vendor, const CHAR16 *name, CHAR8 **bu
         assert(name);
 
         l = sizeof(CHAR16 *) * EFI_MAXIMUM_VARIABLE_SIZE;
-        buf = AllocatePool(l);
-        if (!buf)
-                return EFI_OUT_OF_RESOURCES;
+        buf = xallocate_pool(l);
 
         err = RT->GetVariable((CHAR16 *) name, (EFI_GUID *) vendor, NULL, &l, buf);
         if (!EFI_ERROR(err)) {
@@ -358,7 +354,7 @@ static INTN utf8_to_16(const CHAR8 *stra, CHAR16 *c) {
         return len;
 }
 
-CHAR16 *stra_to_str(const CHAR8 *stra) {
+CHAR16 *xstra_to_str(const CHAR8 *stra) {
         UINTN strlen;
         UINTN len;
         UINTN i;
@@ -367,9 +363,7 @@ CHAR16 *stra_to_str(const CHAR8 *stra) {
         assert(stra);
 
         len = strlena(stra);
-        str = AllocatePool((len + 1) * sizeof(CHAR16));
-        if (!str)
-                return NULL;
+        str = xnew(CHAR16, len + 1);
 
         strlen = 0;
         i = 0;
@@ -390,7 +384,7 @@ CHAR16 *stra_to_str(const CHAR8 *stra) {
         return str;
 }
 
-CHAR16 *stra_to_path(const CHAR8 *stra) {
+CHAR16 *xstra_to_path(const CHAR8 *stra) {
         CHAR16 *str;
         UINTN strlen;
         UINTN len;
@@ -399,9 +393,7 @@ CHAR16 *stra_to_path(const CHAR8 *stra) {
         assert(stra);
 
         len = strlena(stra);
-        str = AllocatePool((len + 2) * sizeof(CHAR16));
-        if (!str)
-                return NULL;
+        str = xnew(CHAR16, len + 2);
 
         str[0] = '\\';
         strlen = 1;
@@ -443,11 +435,12 @@ CHAR8 *strchra(const CHAR8 *s, CHAR8 c) {
         return NULL;
 }
 
-EFI_STATUS file_read(EFI_FILE_HANDLE dir, const CHAR16 *name, UINTN off, UINTN size, CHAR8 **ret, UINTN *ret_size) {
-        _cleanup_(FileHandleClosep) EFI_FILE_HANDLE handle = NULL;
+EFI_STATUS file_read(EFI_FILE *dir, const CHAR16 *name, UINTN off, UINTN size, CHAR8 **ret, UINTN *ret_size) {
+        _cleanup_(file_closep) EFI_FILE *handle = NULL;
         _cleanup_freepool_ CHAR8 *buf = NULL;
         EFI_STATUS err;
 
+        assert(dir);
         assert(name);
         assert(ret);
 
@@ -462,7 +455,7 @@ EFI_STATUS file_read(EFI_FILE_HANDLE dir, const CHAR16 *name, UINTN off, UINTN s
                 if (EFI_ERROR(err))
                         return err;
 
-                size = info->FileSize+1;
+                size = info->FileSize;
         }
 
         if (off > 0) {
@@ -471,15 +464,16 @@ EFI_STATUS file_read(EFI_FILE_HANDLE dir, const CHAR16 *name, UINTN off, UINTN s
                         return err;
         }
 
-        buf = AllocatePool(size + 1);
-        if (!buf)
-                return EFI_OUT_OF_RESOURCES;
+        /* Allocate some extra bytes to guarantee the result is NUL-terminated for CHAR8 and CHAR16 strings. */
+        UINTN extra = size % sizeof(CHAR16) + sizeof(CHAR16);
 
+        buf = xallocate_pool(size + extra);
         err = handle->Read(handle, &size, buf);
         if (EFI_ERROR(err))
                 return err;
 
-        buf[size] = '\0';
+        /* Note that handle->Read() changes size to reflect the actualy bytes read. */
+        ZeroMem(buf + size, extra);
 
         *ret = TAKE_PTR(buf);
         if (ret_size)
@@ -516,20 +510,6 @@ EFI_STATUS log_oom(void) {
         return EFI_OUT_OF_RESOURCES;
 }
 
-void *memmem_safe(const void *haystack, UINTN haystack_len, const void *needle, UINTN needle_len) {
-        assert(haystack || haystack_len == 0);
-        assert(needle || needle_len == 0);
-
-        if (needle_len == 0)
-                return (void*)haystack;
-
-        for (const CHAR8 *h = haystack, *n = needle; haystack_len >= needle_len; h++, haystack_len--)
-                if (*h == *n && CompareMem(h + 1, n + 1, needle_len - 1) == 0)
-                        return (void*)h;
-
-        return NULL;
-}
-
 void print_at(UINTN x, UINTN y, UINTN attr, const CHAR16 *str) {
         assert(str);
         ST->ConOut->SetCursorPosition(ST->ConOut, x, y);
@@ -554,30 +534,26 @@ void sort_pointer_array(
                 return;
 
         for (UINTN i = 1; i < n_members; i++) {
-                BOOLEAN more = FALSE;
+                UINTN k;
+                void *entry = array[i];
 
-                for (UINTN k = 0; k < n_members - i; k++) {
-                        void *entry;
+                for (k = i; k > 0; k--) {
+                        if (compare(array[k - 1], entry) <= 0)
+                                break;
 
-                        if (compare(array[k], array[k+1]) <= 0)
-                                continue;
-
-                        entry = array[k];
-                        array[k] = array[k+1];
-                        array[k+1] = entry;
-                        more = TRUE;
+                        array[k] = array[k - 1];
                 }
-                if (!more)
-                        break;
+
+                array[k] = entry;
         }
 }
 
 EFI_STATUS get_file_info_harder(
-                EFI_FILE_HANDLE handle,
+                EFI_FILE *handle,
                 EFI_FILE_INFO **ret,
                 UINTN *ret_size) {
 
-        UINTN size = OFFSETOF(EFI_FILE_INFO, FileName) + 256;
+        UINTN size = offsetof(EFI_FILE_INFO, FileName) + 256;
         _cleanup_freepool_ EFI_FILE_INFO *fi = NULL;
         EFI_STATUS err;
 
@@ -586,17 +562,11 @@ EFI_STATUS get_file_info_harder(
 
         /* A lot like LibFileInfo() but with useful error propagation */
 
-        fi = AllocatePool(size);
-        if (!fi)
-                return EFI_OUT_OF_RESOURCES;
-
+        fi = xallocate_pool(size);
         err = handle->GetInfo(handle, &GenericFileInfo, &size, fi);
         if (err == EFI_BUFFER_TOO_SMALL) {
                 FreePool(fi);
-                fi = AllocatePool(size);  /* GetInfo tells us the required size, let's use that now */
-                if (!fi)
-                        return EFI_OUT_OF_RESOURCES;
-
+                fi = xallocate_pool(size);  /* GetInfo tells us the required size, let's use that now */
                 err = handle->GetInfo(handle, &GenericFileInfo, &size, fi);
         }
 
@@ -612,7 +582,7 @@ EFI_STATUS get_file_info_harder(
 }
 
 EFI_STATUS readdir_harder(
-                EFI_FILE_HANDLE handle,
+                EFI_FILE *handle,
                 EFI_FILE_INFO **buffer,
                 UINTN *buffer_size) {
 
@@ -627,12 +597,13 @@ EFI_STATUS readdir_harder(
          * the specified buffer needs to be freed by caller, after final use. */
 
         if (!*buffer) {
-                sz = OFFSETOF(EFI_FILE_INFO, FileName) /* + 256 */;
-
-                *buffer = AllocatePool(sz);
-                if (!*buffer)
-                        return EFI_OUT_OF_RESOURCES;
-
+                /* Some broken firmware violates the EFI spec by still advancing the readdir
+                 * position when returning EFI_BUFFER_TOO_SMALL, effectively skipping over any files when
+                 * the buffer was too small. Therefore, start with a buffer that should handle FAT32 max
+                 * file name length.
+                 * As a side effect, most readdir_harder() calls will now be slightly faster. */
+                sz = sizeof(EFI_FILE_INFO) + 256 * sizeof(CHAR16);
+                *buffer = xallocate_pool(sz);
                 *buffer_size = sz;
         } else
                 sz = *buffer_size;
@@ -640,15 +611,8 @@ EFI_STATUS readdir_harder(
         err = handle->Read(handle, &sz, *buffer);
         if (err == EFI_BUFFER_TOO_SMALL) {
                 FreePool(*buffer);
-
-                *buffer = AllocatePool(sz);
-                if (!*buffer) {
-                        *buffer_size = 0;
-                        return EFI_OUT_OF_RESOURCES;
-                }
-
+                *buffer = xallocate_pool(sz);
                 *buffer_size = sz;
-
                 err = handle->Read(handle, &sz, *buffer);
         }
         if (EFI_ERROR(err))
@@ -677,7 +641,28 @@ UINTN strnlena(const CHAR8 *p, UINTN maxlen) {
         return c;
 }
 
-CHAR8 *strndup8(const CHAR8 *p, UINTN sz) {
+INTN strncasecmpa(const CHAR8 *a, const CHAR8 *b, UINTN maxlen) {
+        if (!a || !b)
+                return CMP(a, b);
+
+        while (maxlen > 0) {
+                CHAR8 ca = *a, cb = *b;
+                if (ca >= 'A' && ca <= 'Z')
+                        ca += 'a' - 'A';
+                if (cb >= 'A' && cb <= 'Z')
+                        cb += 'a' - 'A';
+                if (!ca || ca != cb)
+                        return ca - cb;
+
+                a++;
+                b++;
+                maxlen--;
+        }
+
+        return 0;
+}
+
+CHAR8 *xstrndup8(const CHAR8 *p, UINTN sz) {
         CHAR8 *n;
 
         /* Following efilib's naming scheme this function would be called strndupa(), but we already have a
@@ -688,9 +673,7 @@ CHAR8 *strndup8(const CHAR8 *p, UINTN sz) {
 
         sz = strnlena(p, sz);
 
-        n = AllocatePool(sz + 1);
-        if (!n)
-                return NULL;
+        n = xallocate_pool(sz + 1);
 
         if (sz > 0)
                 CopyMem(n, p, sz);
@@ -722,11 +705,11 @@ CHAR16 **strv_free(CHAR16 **v) {
 }
 
 EFI_STATUS open_directory(
-                EFI_FILE_HANDLE root,
+                EFI_FILE *root,
                 const CHAR16 *path,
-                EFI_FILE_HANDLE *ret) {
+                EFI_FILE **ret) {
 
-        _cleanup_(FileHandleClosep) EFI_FILE_HANDLE dir = NULL;
+        _cleanup_(file_closep) EFI_FILE *dir = NULL;
         _cleanup_freepool_ EFI_FILE_INFO *file_info = NULL;
         EFI_STATUS err;
 
@@ -761,3 +744,71 @@ UINT64 get_os_indications_supported(void) {
 
         return osind;
 }
+
+#ifdef EFI_DEBUG
+__attribute__((noinline)) void debug_break(void) {
+        /* This is a poor programmer's breakpoint to wait until a debugger
+         * has attached to us. Just "set variable wait = 0" or "return" to continue. */
+        volatile BOOLEAN wait = TRUE;
+        while (wait)
+                /* Prefer asm based stalling so that gdb has a source location to present. */
+#if defined(__i386__) || defined(__x86_64__)
+                asm volatile("pause");
+#elif defined(__aarch64__)
+                asm volatile("wfi");
+#else
+                BS->Stall(5000);
+#endif
+}
+#endif
+
+#if defined(__i386__) || defined(__x86_64__)
+static inline UINT8 inb(UINT16 port) {
+        UINT8 value;
+        asm volatile("inb %1, %0" : "=a"(value) : "Nd"(port));
+        return value;
+}
+
+static inline void outb(UINT16 port, UINT8 value) {
+        asm volatile("outb %0, %1" : : "a"(value), "Nd"(port));
+}
+
+void beep(UINTN beep_count) {
+        enum {
+                PITCH                = 500,
+                BEEP_DURATION_USEC   = 100 * 1000,
+                WAIT_DURATION_USEC   = 400 * 1000,
+
+                PIT_FREQUENCY        = 0x1234dd,
+                SPEAKER_CONTROL_PORT = 0x61,
+                SPEAKER_ON_MASK      = 0x03,
+                TIMER_PORT_MAGIC     = 0xB6,
+                TIMER_CONTROL_PORT   = 0x43,
+                TIMER_CONTROL2_PORT  = 0x42,
+        };
+
+        /* Set frequency. */
+        UINT32 counter = PIT_FREQUENCY / PITCH;
+        outb(TIMER_CONTROL_PORT, TIMER_PORT_MAGIC);
+        outb(TIMER_CONTROL2_PORT, counter & 0xFF);
+        outb(TIMER_CONTROL2_PORT, (counter >> 8) & 0xFF);
+
+        UINT8 value = inb(SPEAKER_CONTROL_PORT);
+
+        while (beep_count > 0) {
+                /* Turn speaker on. */
+                value |= SPEAKER_ON_MASK;
+                outb(SPEAKER_CONTROL_PORT, value);
+
+                BS->Stall(BEEP_DURATION_USEC);
+
+                /* Turn speaker off. */
+                value &= ~SPEAKER_ON_MASK;
+                outb(SPEAKER_CONTROL_PORT, value);
+
+                beep_count--;
+                if (beep_count > 0)
+                        BS->Stall(WAIT_DURATION_USEC);
+        }
+}
+#endif

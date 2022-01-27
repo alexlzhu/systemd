@@ -193,6 +193,7 @@ static int bpf_firewall_compile_bpf(
         };
 
         _cleanup_(bpf_program_freep) BPFProgram *p = NULL;
+        const char *prog_name = is_ingress ? "sd_fw_ingress" : "sd_fw_egress";
         int accounting_map_fd, r;
         bool access_enabled;
 
@@ -216,7 +217,7 @@ static int bpf_firewall_compile_bpf(
                 return 0;
         }
 
-        r = bpf_program_new(BPF_PROG_TYPE_CGROUP_SKB, &p);
+        r = bpf_program_new(BPF_PROG_TYPE_CGROUP_SKB, prog_name, &p);
         if (r < 0)
                 return r;
 
@@ -604,7 +605,7 @@ static int load_bpf_progs_from_fs_to_set(Unit *u, char **filter_paths, Set **set
                 _cleanup_(bpf_program_freep) BPFProgram *prog = NULL;
                 int r;
 
-                r = bpf_program_new(BPF_PROG_TYPE_CGROUP_SKB, &prog);
+                r = bpf_program_new(BPF_PROG_TYPE_CGROUP_SKB, NULL, &prog);
                 if (r < 0)
                         return log_unit_error_errno(u, r, "Can't allocate CGROUP SKB BPF program: %m");
 
@@ -825,7 +826,7 @@ int bpf_firewall_supported(void) {
                 return supported = BPF_FIREWALL_UNSUPPORTED;
         }
 
-        r = bpf_program_new(BPF_PROG_TYPE_CGROUP_SKB, &program);
+        r = bpf_program_new(BPF_PROG_TYPE_CGROUP_SKB, NULL, &program);
         if (r < 0) {
                 bpf_firewall_unsupported_reason =
                         log_debug_errno(r, "Can't allocate CGROUP SKB BPF program, BPF firewalling is not supported: %m");
@@ -872,7 +873,10 @@ int bpf_firewall_supported(void) {
 
                 /* YAY! */
         } else {
-                log_debug("Wut? Kernel accepted our invalid BPF_PROG_DETACH call? Something is weird, assuming BPF firewalling is broken and hence not supported.");
+                bpf_firewall_unsupported_reason =
+                        log_debug_errno(SYNTHETIC_ERRNO(EBADE),
+                                        "Wut? Kernel accepted our invalid BPF_PROG_DETACH call? "
+                                        "Something is weird, assuming BPF firewalling is broken and hence not supported.");
                 return supported = BPF_FIREWALL_UNSUPPORTED;
         }
 
@@ -900,7 +904,10 @@ int bpf_firewall_supported(void) {
 
                 return supported = BPF_FIREWALL_SUPPORTED;
         } else {
-                log_debug("Wut? Kernel accepted our invalid BPF_PROG_ATTACH+BPF_F_ALLOW_MULTI call? Something is weird, assuming BPF firewalling is broken and hence not supported.");
+                bpf_firewall_unsupported_reason =
+                        log_debug_errno(SYNTHETIC_ERRNO(EBADE),
+                                        "Wut? Kernel accepted our invalid BPF_PROG_ATTACH+BPF_F_ALLOW_MULTI call? "
+                                        "Something is weird, assuming BPF firewalling is broken and hence not supported.");
                 return supported = BPF_FIREWALL_UNSUPPORTED;
         }
 }
@@ -908,7 +915,10 @@ int bpf_firewall_supported(void) {
 void emit_bpf_firewall_warning(Unit *u) {
         static bool warned = false;
 
-        if (!warned) {
+        assert(u);
+        assert(u->manager);
+
+        if (!warned && !MANAGER_IS_TEST_RUN(u->manager)) {
                 bool quiet = bpf_firewall_unsupported_reason == -EPERM && detect_container() > 0;
 
                 log_unit_full_errno(u, quiet ? LOG_DEBUG : LOG_WARNING, bpf_firewall_unsupported_reason,

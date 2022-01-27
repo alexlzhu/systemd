@@ -116,7 +116,7 @@ static bool link_address_is_reachable(Link *link, int family, const union in_add
                         continue;
                 if (route->family != family)
                         continue;
-                if (!in_addr_is_set(route->family, &route->dst))
+                if (!in_addr_is_set(route->family, &route->dst) && route->dst_prefixlen == 0)
                         continue;
                 if (in_addr_prefix_covers(family, &route->dst, route->dst_prefixlen, address) > 0)
                         return true;
@@ -221,25 +221,22 @@ DEFINE_STRING_TABLE_LOOKUP_WITH_FALLBACK(route_protocol_full, int, UINT8_MAX);
 
 int route_flags_to_string_alloc(uint32_t flags, char **ret) {
         _cleanup_free_ char *str = NULL;
-        static const struct {
-                uint32_t flag;
-                const char *name;
-        } map[] = {
-                { RTNH_F_DEAD,       "dead"       }, /* Nexthop is dead (used by multipath) */
-                { RTNH_F_PERVASIVE,  "pervasive"  }, /* Do recursive gateway lookup */
-                { RTNH_F_ONLINK,     "onlink"     }, /* Gateway is forced on link */
-                { RTNH_F_OFFLOAD,    "offload"    }, /* Nexthop is offloaded */
-                { RTNH_F_LINKDOWN,   "linkdown"   }, /* carrier-down on nexthop */
-                { RTNH_F_UNRESOLVED, "unresolved" }, /* The entry is unresolved (ipmr) */
-                { RTNH_F_TRAP,       "trap"       }, /* Nexthop is trapping packets */
+        static const char* map[] = {
+                [LOG2U(RTNH_F_DEAD)]       = "dead",       /* Nexthop is dead (used by multipath) */
+                [LOG2U(RTNH_F_PERVASIVE)]  = "pervasive",  /* Do recursive gateway lookup */
+                [LOG2U(RTNH_F_ONLINK)]     = "onlink" ,    /* Gateway is forced on link */
+                [LOG2U(RTNH_F_OFFLOAD)]    = "offload",    /* Nexthop is offloaded */
+                [LOG2U(RTNH_F_LINKDOWN)]   = "linkdown",   /* carrier-down on nexthop */
+                [LOG2U(RTNH_F_UNRESOLVED)] = "unresolved", /* The entry is unresolved (ipmr) */
+                [LOG2U(RTNH_F_TRAP)]       = "trap",       /* Nexthop is trapping packets */
         };
 
         assert(ret);
 
         for (size_t i = 0; i < ELEMENTSOF(map); i++)
-                if (flags & map[i].flag &&
-                    !strextend_with_separator(&str, ",", map[i].name))
-                        return -ENOMEM;
+                if (FLAGS_SET(flags, 1 << i) && map[i])
+                        if (!strextend_with_separator(&str, ",", map[i]))
+                                return -ENOMEM;
 
         *ret = TAKE_PTR(str);
         return 0;
@@ -363,9 +360,19 @@ int config_parse_route_table_names(
 
                 *num++ = '\0';
 
+                if (isempty(name)) {
+                        log_syntax(unit, LOG_WARNING, filename, line, 0,
+                                   "Route table name cannot be empty. Ignoring assignment: %s:%s", name, num);
+                        continue;
+                }
+                if (in_charset(name, DIGITS)) {
+                        log_syntax(unit, LOG_WARNING, filename, line, 0,
+                                   "Route table name cannot be numeric. Ignoring assignment: %s:%s", name, num);
+                        continue;
+                }
                 if (STR_IN_SET(name, "default", "main", "local")) {
                         log_syntax(unit, LOG_WARNING, filename, line, 0,
-                                   "Route table name %s already predefined. Ignoring assignment: %s:%s", name, name, num);
+                                   "Route table name %s is already predefined. Ignoring assignment: %s:%s", name, name, num);
                         continue;
                 }
 

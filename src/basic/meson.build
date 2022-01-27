@@ -82,6 +82,8 @@ basic_sources = files('''
         inotify-util.h
         io-util.c
         io-util.h
+        ioprio-util.c
+        ioprio-util.h
         limits-util.c
         limits-util.h
         linux/btrfs.h
@@ -342,6 +344,7 @@ arch_list = [
         'arm64',
         'i386',
         'ia64',
+        'loongarch64',
         'm68k',
         'mips64',
         'mips64n32',
@@ -381,7 +384,7 @@ filesystem_includes = ['linux/magic.h',
                        'linux/gfs2_ondisk.h']
 
 check_filesystems = find_program('check-filesystems.sh')
-r = run_command([check_filesystems, cpp, 'filesystems-gperf.gperf'] + filesystem_includes)
+r = run_command([check_filesystems, cpp, 'filesystems-gperf.gperf'] + filesystem_includes, check: false)
 if r.returncode() != 0
         error('found unknown filesystem(s) defined in kernel headers:\n\n' + r.stdout())
         r.stdout()
@@ -425,7 +428,7 @@ libbasic = static_library(
                         libcap,
                         libm],
         c_args : ['-fvisibility=default'],
-        install : false)
+        build_by_default : false)
 
 ############################################################
 
@@ -440,4 +443,5 @@ libbasic_gcrypt = static_library(
         basic_gcrypt_sources,
         include_directories : basic_includes,
         dependencies : [libgcrypt],
-        c_args : ['-fvisibility=default'])
+        c_args : ['-fvisibility=default'],
+        build_by_default : false)

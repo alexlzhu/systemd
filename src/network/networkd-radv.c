@@ -9,7 +9,7 @@
 #include "dns-domain.h"
 #include "networkd-address-generation.h"
 #include "networkd-address.h"
-#include "networkd-dhcp6.h"
+#include "networkd-dhcp-prefix-delegation.h"
 #include "networkd-link.h"
 #include "networkd-manager.h"
 #include "networkd-network.h"
@@ -27,9 +27,9 @@ void network_adjust_radv(Network *network) {
 
         /* After this function is called, network->router_prefix_delegation can be treated as a boolean. */
 
-        if (network->dhcp6_pd < 0)
+        if (network->dhcp_pd < 0)
                 /* For backward compatibility. */
-                network->dhcp6_pd = FLAGS_SET(network->router_prefix_delegation, RADV_PREFIX_DELEGATION_DHCP6);
+                network->dhcp_pd = FLAGS_SET(network->router_prefix_delegation, RADV_PREFIX_DELEGATION_DHCP6);
 
         if (!FLAGS_SET(network->link_local, ADDRESS_FAMILY_IPV6)) {
                 if (network->router_prefix_delegation != RADV_PREFIX_DELEGATION_NONE)
@@ -54,7 +54,7 @@ void network_adjust_radv(Network *network) {
 bool link_radv_enabled(Link *link) {
         assert(link);
 
-        if (!link_ipv6ll_enabled(link))
+        if (!link_may_have_ipv6ll(link))
                 return false;
 
         return link->network->router_prefix_delegation;
@@ -69,16 +69,16 @@ Prefix *prefix_free(Prefix *prefix) {
                 hashmap_remove(prefix->network->prefixes_by_section, prefix->section);
         }
 
-        network_config_section_free(prefix->section);
+        config_section_free(prefix->section);
         set_free(prefix->tokens);
 
         return mfree(prefix);
 }
 
-DEFINE_NETWORK_SECTION_FUNCTIONS(Prefix, prefix_free);
+DEFINE_SECTION_CLEANUP_FUNCTIONS(Prefix, prefix_free);
 
 static int prefix_new_static(Network *network, const char *filename, unsigned section_line, Prefix **ret) {
-        _cleanup_(network_config_section_freep) NetworkConfigSection *n = NULL;
+        _cleanup_(config_section_freep) ConfigSection *n = NULL;
         _cleanup_(prefix_freep) Prefix *prefix = NULL;
         int r;
 
@@ -87,7 +87,7 @@ static int prefix_new_static(Network *network, const char *filename, unsigned se
         assert(filename);
         assert(section_line > 0);
 
-        r = network_config_section_new(filename, section_line, &n);
+        r = config_section_new(filename, section_line, &n);
         if (r < 0)
                 return r;
 
@@ -111,7 +111,7 @@ static int prefix_new_static(Network *network, const char *filename, unsigned se
                 .address_auto_configuration = true,
         };
 
-        r = hashmap_ensure_put(&network->prefixes_by_section, &network_config_hash_ops, prefix->section, prefix);
+        r = hashmap_ensure_put(&network->prefixes_by_section, &config_section_hash_ops, prefix->section, prefix);
         if (r < 0)
                 return r;
 
@@ -128,15 +128,15 @@ RoutePrefix *route_prefix_free(RoutePrefix *prefix) {
                 hashmap_remove(prefix->network->route_prefixes_by_section, prefix->section);
         }
 
-        network_config_section_free(prefix->section);
+        config_section_free(prefix->section);
 
         return mfree(prefix);
 }
 
-DEFINE_NETWORK_SECTION_FUNCTIONS(RoutePrefix, route_prefix_free);
+DEFINE_SECTION_CLEANUP_FUNCTIONS(RoutePrefix, route_prefix_free);
 
 static int route_prefix_new_static(Network *network, const char *filename, unsigned section_line, RoutePrefix **ret) {
-        _cleanup_(network_config_section_freep) NetworkConfigSection *n = NULL;
+        _cleanup_(config_section_freep) ConfigSection *n = NULL;
         _cleanup_(route_prefix_freep) RoutePrefix *prefix = NULL;
         int r;
 
@@ -145,7 +145,7 @@ static int route_prefix_new_static(Network *network, const char *filename, unsig
         assert(filename);
         assert(section_line > 0);
 
-        r = network_config_section_new(filename, section_line, &n);
+        r = config_section_new(filename, section_line, &n);
         if (r < 0)
                 return r;
 
@@ -166,7 +166,7 @@ static int route_prefix_new_static(Network *network, const char *filename, unsig
                 .lifetime = RADV_DEFAULT_VALID_LIFETIME_USEC,
         };
 
-        r = hashmap_ensure_put(&network->route_prefixes_by_section, &network_config_hash_ops, prefix->section, prefix);
+        r = hashmap_ensure_put(&network->route_prefixes_by_section, &config_section_hash_ops, prefix->section, prefix);
         if (r < 0)
                 return r;
 
@@ -410,6 +410,8 @@ set_domains:
 }
 
 static int radv_find_uplink(Link *link, Link **ret) {
+        int r;
+
         assert(link);
 
         if (link->network->router_uplink_name)
@@ -419,8 +421,12 @@ static int radv_find_uplink(Link *link, Link **ret) {
                 return link_get_by_index(link->manager, link->network->router_uplink_index, ret);
 
         if (link->network->router_uplink_index == UPLINK_INDEX_AUTO) {
-                /* It is not necessary to propagate error in automatic selection. */
-                if (manager_find_uplink(link->manager, AF_INET6, link, ret) < 0)
+                if (link_dhcp_pd_is_enabled(link))
+                        r = dhcp_pd_find_uplink(link, ret); /* When DHCP-PD is enabled, use its uplink. */
+                else
+                        r = manager_find_uplink(link->manager, AF_INET6, link, ret);
+                if (r < 0)
+                        /* It is not necessary to propagate error in automatic selection. */
                         *ret = NULL;
                 return 0;
         }
@@ -636,10 +642,10 @@ int radv_start(Link *link) {
         if (sd_radv_is_running(link->radv))
                 return 0;
 
-        if (link->network->dhcp6_pd_announce) {
-                r = dhcp6_request_prefix_delegation(link);
+        if (link->network->dhcp_pd_announce) {
+                r = dhcp_request_prefix_delegation(link);
                 if (r < 0)
-                        return log_link_debug_errno(link, r, "Failed to request DHCPv6 prefix delegation: %m");
+                        return log_link_debug_errno(link, r, "Failed to request DHCP delegated subnet prefix: %m");
         }
 
         log_link_debug(link, "Starting IPv6 Router Advertisements");

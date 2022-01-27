@@ -19,6 +19,7 @@
 #include "dirent-util.h"
 #include "efi-loader.h"
 #include "efivars.h"
+#include "env-file.h"
 #include "env-util.h"
 #include "escape.h"
 #include "fd-util.h"
@@ -40,6 +41,7 @@
 #include "sync-util.h"
 #include "terminal-util.h"
 #include "tmpfile-util.h"
+#include "tmpfile-util-label.h"
 #include "umask-util.h"
 #include "utf8.h"
 #include "util.h"
@@ -53,10 +55,13 @@ static bool arg_print_dollar_boot_path = false;
 static bool arg_touch_variables = true;
 static PagerFlags arg_pager_flags = 0;
 static bool arg_graceful = false;
-static int arg_make_machine_id_directory = -1;
+static int arg_make_machine_id_directory = 0;
+static sd_id128_t arg_machine_id = SD_ID128_NULL;
+static char *arg_install_layout = NULL;
 
 STATIC_DESTRUCTOR_REGISTER(arg_esp_path, freep);
 STATIC_DESTRUCTOR_REGISTER(arg_xbootldr_path, freep);
+STATIC_DESTRUCTOR_REGISTER(arg_install_layout, freep);
 
 static const char *arg_dollar_boot_path(void) {
         /* $BOOT shall be the XBOOTLDR partition if it exists, and otherwise the ESP */
@@ -119,17 +124,68 @@ static int acquire_xbootldr(bool unprivileged_mode, sd_id128_t *ret_uuid) {
         return 1;
 }
 
-static void settle_make_machine_id_directory(void) {
+static int load_install_machine_id_and_layout(void) {
+        /* Figure out the right machine-id for operations. If KERNEL_INSTALL_MACHINE_ID is configured in
+         * /etc/machine-info, let's use that. Otherwise, just use the real machine-id.
+         *
+         * Also load KERNEL_INSTALL_LAYOUT.
+         */
+        _cleanup_free_ char *s = NULL, *layout = NULL;
         int r;
 
-        if (arg_make_machine_id_directory >= 0)
-                return;
+        r = parse_env_file(NULL, "/etc/machine-info",
+                           "KERNEL_INSTALL_LAYOUT", &layout,
+                           "KERNEL_INSTALL_MACHINE_ID", &s);
+        if (r < 0 && r != -ENOENT)
+                return log_error_errno(r, "Failed to parse /etc/machine-info: %m");
 
-        r = path_is_temporary_fs("/etc/machine-id");
+        if (isempty(s)) {
+                r = sd_id128_get_machine(&arg_machine_id);
+                if (r < 0)
+                        return log_error_errno(r, "Failed to get machine-id: %m");
+        } else {
+                r = sd_id128_from_string(s, &arg_machine_id);
+                if (r < 0)
+                        return log_error_errno(r, "Failed to parse KERNEL_INSTALL_MACHINE_ID=%s in /etc/machine-info: %m", s);
+
+        }
+        log_debug("Using KERNEL_INSTALL_MACHINE_ID=%s from %s.",
+                  SD_ID128_TO_STRING(arg_machine_id),
+                  isempty(s) ? "/etc/machine_id" : "KERNEL_INSTALL_MACHINE_ID in /etc/machine-info");
+
+        if (!isempty(layout)) {
+                log_debug("KERNEL_INSTALL_LAYOUT=%s is specified in /etc/machine-info.", layout);
+                arg_install_layout = TAKE_PTR(layout);
+        }
+
+        return 0;
+}
+
+static int settle_install_machine_id(void) {
+        int r;
+
+        r = load_install_machine_id_and_layout();
         if (r < 0)
-                log_debug_errno(r, "Couldn't determine whether /etc/machine-id is on a temporary file system, assuming so.");
+                return r;
 
-        arg_make_machine_id_directory = r == 0;
+        bool layout_non_bls = arg_install_layout && !streq(arg_install_layout, "bls");
+        if (arg_make_machine_id_directory < 0) {
+                if (layout_non_bls)
+                        arg_make_machine_id_directory = 0;
+                else {
+                        r = path_is_temporary_fs("/etc/machine-id");
+                        if (r < 0)
+                                return log_debug_errno(r, "Couldn't determine whether /etc/machine-id is on a temporary file system: %m");
+                        arg_make_machine_id_directory = r == 0;
+                }
+        }
+
+        if (arg_make_machine_id_directory > 0 && layout_non_bls)
+                return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                       "KERNEL_INSTALL_LAYOUT=%s is configured, but bls directory creation was requested.",
+                                       arg_install_layout);
+
+        return 0;
 }
 
 /* search for "#### LoaderInfo: systemd-boot 218 ####" string inside the binary */
@@ -184,7 +240,6 @@ finish:
 
 static int enumerate_binaries(const char *esp_path, const char *path, const char *prefix) {
         _cleanup_closedir_ DIR *d = NULL;
-        struct dirent *de;
         const char *p;
         int c = 0, r;
 
@@ -628,14 +683,19 @@ static int create_subdirs(const char *root, const char * const *subdirs) {
 
 static int copy_one_file(const char *esp_path, const char *name, bool force) {
         const char *e;
-        char *p, *q;
+        char *p, *q, *dest_name, *s;
         int r;
 
+        dest_name = strdupa_safe(name);
+        s = endswith_no_case(dest_name, ".signed");
+        if (s)
+                *s = 0;
+
         p = strjoina(BOOTLIBDIR "/", name);
-        q = strjoina(esp_path, "/EFI/systemd/", name);
+        q = strjoina(esp_path, "/EFI/systemd/", dest_name);
         r = copy_file_with_version_check(p, q, force);
 
-        e = startswith(name, "systemd-boot");
+        e = startswith(dest_name, "systemd-boot");
         if (e) {
                 int k;
                 char *v;
@@ -653,7 +713,6 @@ static int copy_one_file(const char *esp_path, const char *name, bool force) {
 }
 
 static int install_binaries(const char *esp_path, bool force) {
-        struct dirent *de;
         _cleanup_closedir_ DIR *d = NULL;
         int r = 0;
 
@@ -664,8 +723,17 @@ static int install_binaries(const char *esp_path, bool force) {
         FOREACH_DIRENT(de, d, return log_error_errno(errno, "Failed to read \""BOOTLIBDIR"\": %m")) {
                 int k;
 
-                if (!endswith_no_case(de->d_name, ".efi"))
+                if (!endswith_no_case(de->d_name, ".efi") && !endswith_no_case(de->d_name, ".efi.signed"))
                         continue;
+
+                /* skip the .efi file, if there's a .signed version of it */
+                if (endswith_no_case(de->d_name, ".efi")) {
+                        _cleanup_free_ const char *s = strjoin(BOOTLIBDIR, "/", de->d_name, ".signed");
+                        if (!s)
+                                return log_oom();
+                        if (access(s, F_OK) >= 0)
+                                continue;
+                }
 
                 k = copy_one_file(esp_path, de->d_name, force);
                 /* Don't propagate an error code if no update necessary, installed version already equal or
@@ -836,7 +904,6 @@ static int install_variables(const char *esp_path,
 
 static int remove_boot_efi(const char *esp_path) {
         _cleanup_closedir_ DIR *d = NULL;
-        struct dirent *de;
         const char *p;
         int r, c = 0;
 
@@ -913,20 +980,14 @@ static int remove_subdirs(const char *root, const char *const *subdirs) {
 }
 
 static int remove_machine_id_directory(const char *root) {
-        sd_id128_t machine_id;
-        int r;
-
         assert(root);
         assert(arg_make_machine_id_directory >= 0);
+        assert(!sd_id128_is_null(arg_machine_id));
 
         if (!arg_make_machine_id_directory)
                 return 0;
 
-        r = sd_id128_get_machine(&machine_id);
-        if (r < 0)
-                return log_error_errno(r, "Failed to get machine id: %m");
-
-        return rmdir_one(root, SD_ID128_TO_STRING(machine_id));
+        return rmdir_one(root, SD_ID128_TO_STRING(arg_machine_id));
 }
 
 static int remove_binaries(const char *esp_path) {
@@ -1036,13 +1097,8 @@ static int install_loader_config(const char *esp_path) {
                    "#console-mode keep\n");
 
         if (arg_make_machine_id_directory) {
-                sd_id128_t machine_id;
-
-                r = sd_id128_get_machine(&machine_id);
-                if (r < 0)
-                        return log_error_errno(r, "Failed to get machine id: %m");
-
-                fprintf(f, "default %s-*\n", SD_ID128_TO_STRING(machine_id));
+                assert(!sd_id128_is_null(arg_machine_id));
+                fprintf(f, "default %s-*\n", SD_ID128_TO_STRING(arg_machine_id));
         }
 
         r = fflush_sync_and_check(f);
@@ -1060,20 +1116,100 @@ static int install_loader_config(const char *esp_path) {
 }
 
 static int install_machine_id_directory(const char *root) {
-        sd_id128_t machine_id;
-        int r;
-
         assert(root);
         assert(arg_make_machine_id_directory >= 0);
 
         if (!arg_make_machine_id_directory)
                 return 0;
 
-        r = sd_id128_get_machine(&machine_id);
-        if (r < 0)
-                return log_error_errno(r, "Failed to get machine id: %m");
+        assert(!sd_id128_is_null(arg_machine_id));
+        return mkdir_one(root, SD_ID128_TO_STRING(arg_machine_id));
+}
 
-        return mkdir_one(root, SD_ID128_TO_STRING(machine_id));
+static int install_machine_info_config(void) {
+        _cleanup_free_ char *contents = NULL;
+        size_t length;
+        bool need_install_layout = true, need_machine_id;
+        int r;
+
+        assert(arg_make_machine_id_directory >= 0);
+
+        /* We only want to save the machine-id if we created any directories using it. */
+        need_machine_id = arg_make_machine_id_directory;
+
+        _cleanup_fclose_ FILE *orig = fopen("/etc/machine-info", "re");
+        if (!orig && errno != ENOENT)
+                return log_error_errno(errno, "Failed to open /etc/machine-info: %m");
+
+        if (orig) {
+                _cleanup_free_ char *install_layout = NULL, *machine_id = NULL;
+
+                r = parse_env_file(orig, "/etc/machine-info",
+                                   "KERNEL_INSTALL_LAYOUT", &install_layout,
+                                   "KERNEL_INSTALL_MACHINE_ID", &machine_id);
+                if (r < 0)
+                        return log_error_errno(r, "Failed to parse /etc/machine-info: %m");
+
+                rewind(orig);
+
+                if (!isempty(install_layout))
+                        need_install_layout = false;
+
+                if (!isempty(machine_id))
+                        need_machine_id = false;
+
+                if (!need_install_layout && !need_machine_id) {
+                        log_debug("/etc/machine-info already has KERNEL_INSTALL_MACHINE_ID=%s and KERNEL_INSTALL_LAYOUT=%s.",
+                                  machine_id, install_layout);
+                        return 0;
+                }
+
+                r = read_full_stream(orig, &contents, &length);
+                if (r < 0)
+                        return log_error_errno(r, "Failed to read /etc/machine-info: %m");
+        }
+
+        _cleanup_(unlink_and_freep) char *dst_tmp = NULL;
+        _cleanup_fclose_ FILE *dst = NULL;
+        r = fopen_temporary_label("/etc/machine-info",   /* The path for which to the look up the label */
+                                  "/etc/machine-info",   /* Where we want the file actually to end up */
+                                  &dst,                  /* The temporary file we write to */
+                                  &dst_tmp);
+        if (r < 0)
+                return log_debug_errno(r, "Failed to open temporary copy of /etc/machine-info: %m");
+
+        if (contents)
+                fwrite_unlocked(contents, 1, length, dst);
+
+        bool no_newline = !contents || contents[length - 1] == '\n';
+
+        if (need_install_layout) {
+                const char *line = "\nKERNEL_INSTALL_LAYOUT=bls\n" + no_newline;
+                fwrite_unlocked(line, 1, strlen(line), dst);
+                no_newline = false;
+        }
+
+        const char *mid_string = SD_ID128_TO_STRING(arg_machine_id);
+        if (need_machine_id)
+                fprintf(dst, "%sKERNEL_INSTALL_MACHINE_ID=%s\n",
+                        no_newline ? "" : "\n",
+                        mid_string);
+
+        r = fflush_and_check(dst);
+        if (r < 0)
+                return log_error_errno(r, "Failed to write temporary copy of /etc/machine-info: %m");
+        if (fchmod(fileno(dst), 0644) < 0)
+                return log_debug_errno(errno, "Failed to fchmod %s: %m", dst_tmp);
+
+        if (rename(dst_tmp, "/etc/machine-info") < 0)
+                return log_error_errno(errno, "Failed to replace /etc/machine-info: %m");
+
+        log_info("%s /etc/machine-info with%s%s%s",
+                 orig ? "Updated" : "Created",
+                 need_install_layout ? " KERNEL_INSTALL_LAYOUT=bls" : "",
+                 need_machine_id ? " KERNEL_INSTALL_MACHINE_ID=" : "",
+                 need_machine_id ? mid_string : "");
+        return 0;
 }
 
 static int help(int argc, char *argv[], void *userdata) {
@@ -1211,8 +1347,8 @@ static int parse_argv(int argc, char *argv[]) {
                         break;
 
                 case ARG_MAKE_MACHINE_ID_DIRECTORY:
-                        if (streq(optarg, "auto"))
-                                arg_make_machine_id_directory = -1;  /* default */
+                        if (streq(optarg, "auto"))  /* retained for backwards compatibility */
+                                arg_make_machine_id_directory = -1; /* yes if machine-id is permanent */
                         else {
                                 r = parse_boolean_argument("--make-machine-id-directory=", optarg, &b);
                                 if (r < 0)
@@ -1240,12 +1376,43 @@ static void read_efi_var(const char *variable, char **ret) {
 }
 
 static void print_yes_no_line(bool first, bool good, const char *name) {
-        printf("%s%s%s%s %s\n",
+        printf("%s%s %s\n",
                first ? "     Features: " : "               ",
-               ansi_highlight_green_red(good),
-               special_glyph_check_mark(good),
-               ansi_normal(),
+               COLOR_MARK_BOOL(good),
                name);
+}
+
+static int are_we_installed(void) {
+        int r;
+
+        r = acquire_esp(/* privileged_mode= */ false, /* graceful= */ false, NULL, NULL, NULL, NULL);
+        if (r < 0)
+                return r;
+
+        /* Tests whether systemd-boot is installed. It's not obvious what to use as check here: we could
+         * check EFI variables, we could check what binary /EFI/BOOT/BOOT*.EFI points to, or whether the
+         * loader entries directory exists. Here we opted to check whether /EFI/systemd/ is non-empty, which
+         * should be a suitable and very minimal check for a number of reasons:
+         *
+         *  → The check is architecture independent (i.e. we check if any systemd-boot loader is installed,
+         *    not a specific one.)
+         *
+         *  → It doesn't assume we are the only boot loader (i.e doesn't check if we own the main
+         *    /EFI/BOOT/BOOT*.EFI fallback binary.
+         *
+         *  → It specifically checks for systemd-boot, not for other boot loaders (which a check for
+         *    /boot/loader/entries would do). */
+
+        _cleanup_free_ char *p = path_join(arg_esp_path, "/EFI/systemd/");
+        if (!p)
+                return log_oom();
+
+        log_debug("Checking whether %s contains any files…", p);
+        r = dir_is_empty(p);
+        if (r < 0 && r != -ENOENT)
+                return log_error_errno(r, "Failed to check whether %s contains any files: %m", p);
+
+        return r == 0;
 }
 
 static int verb_status(int argc, char *argv[], void *userdata) {
@@ -1436,7 +1603,7 @@ static int verb_list(int argc, char *argv[], void *userdata) {
         else if (r < 0)
                 log_warning_errno(r, "Failed to determine entries reported by boot loader, ignoring: %m");
         else
-                (void) boot_entries_augment_from_loader(&config, efi_entries, false);
+                (void) boot_entries_augment_from_loader(&config, efi_entries);
 
         if (config.n_entries == 0)
                 log_info("No boot loader entries found.");
@@ -1624,11 +1791,24 @@ static int verb_install(int argc, char *argv[], void *userdata) {
         if (r < 0)
                 return r;
 
+        if (!install) {
+                /* If we are updating, don't do anything if sd-boot wasn't actually installed. */
+                r = are_we_installed();
+                if (r < 0)
+                        return r;
+                if (r == 0) {
+                        log_debug("Skipping update because sd-boot is not installed in the ESP.");
+                        return 0;
+                }
+        }
+
         r = acquire_xbootldr(/* unprivileged_mode= */ false, NULL);
         if (r < 0)
                 return r;
 
-        settle_make_machine_id_directory();
+        r = settle_install_machine_id();
+        if (r < 0)
+                return r;
 
         RUN_WITH_UMASK(0002) {
                 if (install) {
@@ -1654,6 +1834,10 @@ static int verb_install(int argc, char *argv[], void *userdata) {
                                 return r;
 
                         r = install_machine_id_directory(arg_dollar_boot_path());
+                        if (r < 0)
+                                return r;
+
+                        r = install_machine_info_config();
                         if (r < 0)
                                 return r;
 
@@ -1686,7 +1870,9 @@ static int verb_remove(int argc, char *argv[], void *userdata) {
         if (r < 0)
                 return r;
 
-        settle_make_machine_id_directory();
+        r = settle_install_machine_id();
+        if (r < 0)
+                return r;
 
         r = remove_binaries(arg_esp_path);
 
@@ -1738,41 +1924,19 @@ static int verb_remove(int argc, char *argv[], void *userdata) {
 }
 
 static int verb_is_installed(int argc, char *argv[], void *userdata) {
-        _cleanup_free_ char *p = NULL;
         int r;
 
-        r = acquire_esp(/* privileged_mode= */ false, /* graceful= */ false, NULL, NULL, NULL, NULL);
+        r = are_we_installed();
         if (r < 0)
                 return r;
 
-        /* Tests whether systemd-boot is installed. It's not obvious what to use as check here: we could
-         * check EFI variables, we could check what binary /EFI/BOOT/BOOT*.EFI points to, or whether the
-         * loader entries directory exists. Here we opted to check whether /EFI/systemd/ is non-empty, which
-         * should be a suitable and very minimal check for a number of reasons:
-         *
-         *  → The check is architecture independent (i.e. we check if any systemd-boot loader is installed, not a
-         *    specific one.)
-         *
-         *  → It doesn't assume we are the only boot loader (i.e doesn't check if we own the main
-         *    /EFI/BOOT/BOOT*.EFI fallback binary.
-         *
-         *  → It specifically checks for systemd-boot, not for other boot loaders (which a check for
-         *    /boot/loader/entries would do). */
-
-        p = path_join(arg_esp_path, "/EFI/systemd/");
-        if (!p)
-                return log_oom();
-
-        r = dir_is_empty(p);
-        if (r > 0 || r == -ENOENT) {
+        if (r > 0) {
+                puts("yes");
+                return EXIT_SUCCESS;
+        } else {
                 puts("no");
                 return EXIT_FAILURE;
         }
-        if (r < 0)
-                return log_error_errno(r, "Failed to detect whether systemd-boot is installed: %m");
-
-        puts("yes");
-        return EXIT_SUCCESS;
 }
 
 static int parse_timeout(const char *arg1, char16_t **ret_timeout, size_t *ret_timeout_size) {

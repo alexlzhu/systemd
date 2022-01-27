@@ -12,7 +12,7 @@
 #define VERTICAL_MAX_OK 1080
 #define VIEWPORT_RATIO 10
 
-static inline void EventClosep(EFI_EVENT *event) {
+static inline void event_closep(EFI_EVENT *event) {
         if (!*event)
                 return;
 
@@ -23,37 +23,44 @@ static inline void EventClosep(EFI_EVENT *event) {
  * Reading input from the console sounds like an easy task to do, but thanks to broken
  * firmware it is actually a nightmare.
  *
- * There is a ConIn and TextInputEx API for this. Ideally we want to use TextInputEx,
- * because that gives us Ctrl/Alt/Shift key state information. Unfortunately, it is not
- * always available and sometimes just non-functional.
+ * There is a SimpleTextInput and SimpleTextInputEx API for this. Ideally we want to use
+ * TextInputEx, because that gives us Ctrl/Alt/Shift key state information. Unfortunately,
+ * it is not always available and sometimes just non-functional.
  *
- * On the other hand we have ConIn, where some firmware likes to just freeze on us
- * if we call ReadKeyStroke on it.
+ * On some firmware, calling ReadKeyStroke or ReadKeyStrokeEx on the default console input
+ * device will just freeze no matter what (even though it *reported* being ready).
+ * Also, multiple input protocols can be backed by the same device, but they can be out of
+ * sync. Falling back on a different protocol can end up with double input.
  *
- * Therefore, we use WaitForEvent on both ConIn and TextInputEx (if available) along
- * with a timer event. The timer ensures there is no need to call into functions
- * that might freeze on us, while still allowing us to show a timeout counter.
- */
+ * Therefore, we will preferably use TextInputEx for ConIn if that is available. Additionally,
+ * we look for the first TextInputEx device the firmware gives us as a fallback option. It
+ * will replace ConInEx permanently if it ever reports a key press.
+ * Lastly, a timer event allows us to provide a input timeout without having to call into
+ * any input functions that can freeze on us or using a busy/stall loop. */
 EFI_STATUS console_key_read(UINT64 *key, UINT64 timeout_usec) {
-        static EFI_SIMPLE_TEXT_INPUT_EX_PROTOCOL *TextInputEx;
-        static BOOLEAN checked;
+        static EFI_SIMPLE_TEXT_INPUT_EX_PROTOCOL *conInEx = NULL, *extraInEx = NULL;
+        static BOOLEAN checked = FALSE;
         UINTN index;
-        EFI_INPUT_KEY k;
         EFI_STATUS err;
-        _cleanup_(EventClosep) EFI_EVENT timer = NULL;
-        EFI_EVENT events[3] = { ST->ConIn->WaitForKey };
-        UINTN n_events = 1;
+        _cleanup_(event_closep) EFI_EVENT timer = NULL;
 
         assert(key);
 
         if (!checked) {
-                err = LibLocateProtocol(&SimpleTextInputExProtocol, (void **)&TextInputEx);
-                if (EFI_ERROR(err) || BS->CheckEvent(TextInputEx->WaitForKeyEx) == EFI_INVALID_PARAMETER)
+                /* Get the *first* TextInputEx device.*/
+                err = LibLocateProtocol(&SimpleTextInputExProtocol, (void **) &extraInEx);
+                if (EFI_ERROR(err) || BS->CheckEvent(extraInEx->WaitForKeyEx) == EFI_INVALID_PARAMETER)
                         /* If WaitForKeyEx fails here, the firmware pretends it talks this
                          * protocol, but it really doesn't. */
-                        TextInputEx = NULL;
-                else
-                        events[n_events++] = TextInputEx->WaitForKeyEx;
+                        extraInEx = NULL;
+
+                /* Get the TextInputEx version of ST->ConIn. */
+                err = BS->HandleProtocol(ST->ConsoleInHandle, &SimpleTextInputExProtocol, (void **) &conInEx);
+                if (EFI_ERROR(err) || BS->CheckEvent(conInEx->WaitForKeyEx) == EFI_INVALID_PARAMETER)
+                        conInEx = NULL;
+
+                if (conInEx == extraInEx)
+                        extraInEx = NULL;
 
                 checked = TRUE;
         }
@@ -61,7 +68,13 @@ EFI_STATUS console_key_read(UINT64 *key, UINT64 timeout_usec) {
         err = BS->CreateEvent(EVT_TIMER, 0, NULL, NULL, &timer);
         if (EFI_ERROR(err))
                 return log_error_status_stall(err, L"Error creating timer event: %r", err);
-        events[n_events++] = timer;
+
+        EFI_EVENT events[] = {
+                timer,
+                conInEx ? conInEx->WaitForKeyEx : ST->ConIn->WaitForKey,
+                extraInEx ? extraInEx->WaitForKeyEx : NULL,
+        };
+        UINTN n_events = extraInEx ? 3 : 2;
 
         /* Watchdog rearming loop in case the user never provides us with input or some
          * broken firmware never returns from WaitForEvent. */
@@ -100,13 +113,21 @@ EFI_STATUS console_key_read(UINT64 *key, UINT64 timeout_usec) {
                 return EFI_TIMEOUT;
         }
 
-        /* TextInputEx might be ready too even if ConIn got to signal first. */
-        if (TextInputEx && !EFI_ERROR(BS->CheckEvent(TextInputEx->WaitForKeyEx))) {
+        /* If the extra input device we found returns something, always use that instead
+         * to work around broken firmware freezing on ConIn/ConInEx. */
+        if (extraInEx && !EFI_ERROR(BS->CheckEvent(extraInEx->WaitForKeyEx))) {
+                conInEx = extraInEx;
+                extraInEx = NULL;
+        }
+
+        /* Do not fall back to ConIn if we have a ConIn that supports TextInputEx.
+         * The two may be out of sync on some firmware, giving us double input. */
+        if (conInEx) {
                 EFI_KEY_DATA keydata;
                 UINT64 keypress;
                 UINT32 shift = 0;
 
-                err = TextInputEx->ReadKeyStrokeEx(TextInputEx, &keydata);
+                err = conInEx->ReadKeyStrokeEx(conInEx, &keydata);
                 if (EFI_ERROR(err))
                         return err;
 
@@ -116,7 +137,7 @@ EFI_STATUS console_key_read(UINT64 *key, UINT64 timeout_usec) {
                                 shift |= EFI_CONTROL_PRESSED;
                         if (keydata.KeyState.KeyShiftState & (EFI_RIGHT_ALT_PRESSED|EFI_LEFT_ALT_PRESSED))
                                 shift |= EFI_ALT_PRESSED;
-                };
+                }
 
                 /* 32 bit modifier keys + 16 bit scan code + 16 bit unicode */
                 keypress = KEYPRESS(shift, keydata.Key.ScanCode, keydata.Key.UnicodeChar);
@@ -126,14 +147,18 @@ EFI_STATUS console_key_read(UINT64 *key, UINT64 timeout_usec) {
                 }
 
                 return EFI_NOT_READY;
+        } else if (BS->CheckEvent(ST->ConIn->WaitForKey)) {
+                EFI_INPUT_KEY k;
+
+                err = ST->ConIn->ReadKeyStroke(ST->ConIn, &k);
+                if (EFI_ERROR(err))
+                        return err;
+
+                *key = KEYPRESS(0, k.ScanCode, k.UnicodeChar);
+                return EFI_SUCCESS;
         }
 
-        err  = ST->ConIn->ReadKeyStroke(ST->ConIn, &k);
-        if (EFI_ERROR(err))
-                return err;
-
-        *key = KEYPRESS(0, k.ScanCode, k.UnicodeChar);
-        return EFI_SUCCESS;
+        return EFI_NOT_READY;
 }
 
 static EFI_STATUS change_mode(INT64 mode) {
@@ -158,19 +183,32 @@ static EFI_STATUS change_mode(INT64 mode) {
         return err;
 }
 
-static INT64 get_auto_mode(void) {
-        EFI_GRAPHICS_OUTPUT_PROTOCOL *GraphicsOutput;
+EFI_STATUS query_screen_resolution(UINT32 *ret_w, UINT32 *ret_h) {
         EFI_STATUS err;
+        EFI_GRAPHICS_OUTPUT_PROTOCOL *go;
 
-        err = LibLocateProtocol(&GraphicsOutputProtocol, (void **)&GraphicsOutput);
-        if (!EFI_ERROR(err) && GraphicsOutput->Mode && GraphicsOutput->Mode->Info) {
-                EFI_GRAPHICS_OUTPUT_MODE_INFORMATION *Info = GraphicsOutput->Mode->Info;
+        err = LibLocateProtocol(&GraphicsOutputProtocol, (void **) &go);
+        if (EFI_ERROR(err))
+                return err;
+
+        if (!go->Mode || !go->Mode->Info)
+                return EFI_DEVICE_ERROR;
+
+        *ret_w = go->Mode->Info->HorizontalResolution;
+        *ret_h = go->Mode->Info->VerticalResolution;
+        return EFI_SUCCESS;
+}
+
+static INT64 get_auto_mode(void) {
+        UINT32 screen_width, screen_height;
+
+        if (!EFI_ERROR(query_screen_resolution(&screen_width, &screen_height))) {
                 BOOLEAN keep = FALSE;
 
                 /* Start verifying if we are in a resolution larger than Full HD
                  * (1920x1080). If we're not, assume we're in a good mode and do not
                  * try to change it. */
-                if (Info->HorizontalResolution <= HORIZONTAL_MAX_OK && Info->VerticalResolution <= VERTICAL_MAX_OK)
+                if (screen_width <= HORIZONTAL_MAX_OK && screen_height <= VERTICAL_MAX_OK)
                         keep = TRUE;
                 /* For larger resolutions, calculate the ratio of the total screen
                  * area to the text viewport area. If it's less than 10 times bigger,
@@ -178,7 +216,7 @@ static INT64 get_auto_mode(void) {
                 else {
                         UINT64 text_area;
                         UINTN x_max, y_max;
-                        UINT64 screen_area = (UINT64)Info->HorizontalResolution * (UINT64)Info->VerticalResolution;
+                        UINT64 screen_area = (UINT64)screen_width * (UINT64)screen_height;
 
                         console_query_mode(&x_max, &y_max);
                         text_area = SYSTEM_FONT_WIDTH * SYSTEM_FONT_HEIGHT * (UINT64)x_max * (UINT64)y_max;

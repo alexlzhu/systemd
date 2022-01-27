@@ -152,7 +152,9 @@ int device_set_syspath(sd_device *device, const char *_syspath, bool verify) {
         if (verify) {
                 r = chase_symlinks(_syspath, NULL, 0, &syspath, NULL);
                 if (r == -ENOENT)
-                        return -ENODEV; /* the device does not exist (any more?) */
+                         /* the device does not exist (any more?) */
+                        return log_debug_errno(SYNTHETIC_ERRNO(ENODEV),
+                                               "sd-device: Failed to chase symlinks in \"%s\".", _syspath);
                 if (r < 0)
                         return log_debug_errno(r, "sd-device: Failed to get target of '%s': %m", _syspath);
 
@@ -173,7 +175,7 @@ int device_set_syspath(sd_device *device, const char *_syspath, bool verify) {
 
                         new_syspath = path_join("/sys", p);
                         if (!new_syspath)
-                                return -ENOMEM;
+                                return log_oom_debug();
 
                         free_and_replace(syspath, new_syspath);
                         path_simplify(syspath);
@@ -187,30 +189,31 @@ int device_set_syspath(sd_device *device, const char *_syspath, bool verify) {
                         if (access(path, F_OK) < 0) {
                                 if (errno == ENOENT)
                                         /* this is not a valid device */
-                                        return -ENODEV;
+                                        return log_debug_errno(SYNTHETIC_ERRNO(ENODEV),
+                                                               "sd-device: the uevent file \"%s\" does not exist.", path);
 
                                 return log_debug_errno(errno, "sd-device: cannot access uevent file for %s: %m", syspath);
                         }
                 } else {
                         /* everything else just needs to be a directory */
                         if (!is_dir(syspath, false))
-                                return -ENODEV;
+                                return log_debug_errno(SYNTHETIC_ERRNO(ENODEV),
+                                                       "sd-device: the syspath \"%s\" is not a directory.", syspath);
                 }
         } else {
                 syspath = strdup(_syspath);
                 if (!syspath)
-                        return -ENOMEM;
+                        return log_oom_debug();
         }
 
         devpath = syspath + STRLEN("/sys");
 
         if (devpath[0] != '/')
-                /* '/sys' alone is not a valid device path */
-                return -ENODEV;
+                return log_debug_errno(SYNTHETIC_ERRNO(ENODEV), "sd-device: \"/sys\" alone is not a valid device path.");
 
         r = device_add_property_internal(device, "DEVPATH", devpath);
         if (r < 0)
-                return r;
+                return log_debug_errno(r, "sd-device: Failed to add \"DEVPATH\" property for device \"%s\": %m", syspath);
 
         free_and_replace(device->syspath, syspath);
         device->devpath = devpath;
@@ -1392,7 +1395,7 @@ int device_read_db_internal_filename(sd_device *device, const char *filename) {
         _cleanup_free_ char *db = NULL;
         const char *value;
         size_t db_len;
-        char key;
+        char key = '\0';  /* Unnecessary initialization to appease gcc-12.0.0-0.4.fc36 */
         int r;
 
         enum {
@@ -1419,7 +1422,7 @@ int device_read_db_internal_filename(sd_device *device, const char *filename) {
 
         device->db_loaded = true;
 
-        for (size_t i = 0; i < db_len; i++) {
+        for (size_t i = 0; i < db_len; i++)
                 switch (state) {
                 case PRE_KEY:
                         if (!strchr(NEWLINE, db[i])) {
@@ -1467,7 +1470,6 @@ int device_read_db_internal_filename(sd_device *device, const char *filename) {
                 default:
                         return log_device_debug_errno(device, SYNTHETIC_ERRNO(EINVAL), "sd-device: invalid db syntax.");
                 }
-        }
 
         return 0;
 }
@@ -1747,7 +1749,6 @@ _public_ const char *sd_device_get_property_next(sd_device *device, const char *
 static int device_sysattrs_read_all_internal(sd_device *device, const char *subdir) {
         _cleanup_free_ char *path_dir = NULL;
         _cleanup_closedir_ DIR *dir = NULL;
-        struct dirent *dent;
         const char *syspath;
         int r;
 
@@ -1779,43 +1780,43 @@ static int device_sysattrs_read_all_internal(sd_device *device, const char *subd
         if (!dir)
                 return -errno;
 
-        FOREACH_DIRENT_ALL(dent, dir, return -errno) {
+        FOREACH_DIRENT_ALL(de, dir, return -errno) {
                 _cleanup_free_ char *path = NULL, *p = NULL;
                 struct stat statbuf;
 
-                if (dot_or_dot_dot(dent->d_name))
+                if (dot_or_dot_dot(de->d_name))
                         continue;
 
                 /* only handle symlinks, regular files, and directories */
-                if (!IN_SET(dent->d_type, DT_LNK, DT_REG, DT_DIR))
+                if (!IN_SET(de->d_type, DT_LNK, DT_REG, DT_DIR))
                         continue;
 
                 if (subdir) {
-                        p = path_join(subdir, dent->d_name);
+                        p = path_join(subdir, de->d_name);
                         if (!p)
                                 return -ENOMEM;
                 }
 
-                if (dent->d_type == DT_DIR) {
+                if (de->d_type == DT_DIR) {
                         /* read subdirectory */
-                        r = device_sysattrs_read_all_internal(device, p ?: dent->d_name);
+                        r = device_sysattrs_read_all_internal(device, p ?: de->d_name);
                         if (r < 0)
                                 return r;
 
                         continue;
                 }
 
-                path = path_join(syspath, p ?: dent->d_name);
+                path = path_join(syspath, p ?: de->d_name);
                 if (!path)
                         return -ENOMEM;
 
                 if (lstat(path, &statbuf) != 0)
                         continue;
 
-                if (!(statbuf.st_mode & S_IRUSR))
+                if ((statbuf.st_mode & (S_IRUSR | S_IWUSR)) == 0)
                         continue;
 
-                r = set_put_strdup(&device->sysattrs, p ?: dent->d_name);
+                r = set_put_strdup(&device->sysattrs, p ?: de->d_name);
                 if (r < 0)
                         return r;
         }

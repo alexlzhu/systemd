@@ -7,11 +7,6 @@
 #include <sys/xattr.h>
 #include <unistd.h>
 
-#if HAVE_ELFUTILS
-#include <dwarf.h>
-#include <elfutils/libdwfl.h>
-#endif
-
 #include "sd-daemon.h"
 #include "sd-journal.h"
 #include "sd-login.h"
@@ -27,6 +22,7 @@
 #include "copy.h"
 #include "coredump-vacuum.h"
 #include "dirent-util.h"
+#include "elf-util.h"
 #include "escape.h"
 #include "fd-util.h"
 #include "fileio.h"
@@ -43,7 +39,6 @@
 #include "signal-util.h"
 #include "socket-util.h"
 #include "special.h"
-#include "stacktrace.h"
 #include "stat-util.h"
 #include "string-table.h"
 #include "string-util.h"
@@ -154,13 +149,13 @@ static uint64_t arg_max_use = UINT64_MAX;
 
 static int parse_config(void) {
         static const ConfigTableItem items[] = {
-                { "Coredump", "Storage",          config_parse_coredump_storage,  0, &arg_storage           },
-                { "Coredump", "Compress",         config_parse_bool,              0, &arg_compress          },
-                { "Coredump", "ProcessSizeMax",   config_parse_iec_uint64,        0, &arg_process_size_max  },
-                { "Coredump", "ExternalSizeMax",  config_parse_iec_uint64,        0, &arg_external_size_max },
-                { "Coredump", "JournalSizeMax",   config_parse_iec_size,          0, &arg_journal_size_max  },
-                { "Coredump", "KeepFree",         config_parse_iec_uint64,        0, &arg_keep_free         },
-                { "Coredump", "MaxUse",           config_parse_iec_uint64,        0, &arg_max_use           },
+                { "Coredump", "Storage",          config_parse_coredump_storage,           0, &arg_storage           },
+                { "Coredump", "Compress",         config_parse_bool,                       0, &arg_compress          },
+                { "Coredump", "ProcessSizeMax",   config_parse_iec_uint64,                 0, &arg_process_size_max  },
+                { "Coredump", "ExternalSizeMax",  config_parse_iec_uint64_infinity,        0, &arg_external_size_max },
+                { "Coredump", "JournalSizeMax",   config_parse_iec_size,                   0, &arg_journal_size_max  },
+                { "Coredump", "KeepFree",         config_parse_iec_uint64,                 0, &arg_keep_free         },
+                { "Coredump", "MaxUse",           config_parse_iec_uint64,                 0, &arg_max_use           },
                 {}
         };
 
@@ -585,7 +580,6 @@ static int compose_open_fds(pid_t pid, char **open_fds) {
         _cleanup_free_ char *buffer = NULL;
         _cleanup_fclose_ FILE *stream = NULL;
         const char *fddelim = "", *path;
-        struct dirent *dent = NULL;
         size_t size = 0;
         int r;
 
@@ -605,20 +599,20 @@ static int compose_open_fds(pid_t pid, char **open_fds) {
         if (!stream)
                 return -ENOMEM;
 
-        FOREACH_DIRENT(dent, proc_fd_dir, return -errno) {
+        FOREACH_DIRENT(de, proc_fd_dir, return -errno) {
                 _cleanup_fclose_ FILE *fdinfo = NULL;
                 _cleanup_free_ char *fdname = NULL;
                 _cleanup_close_ int fd = -1;
 
-                r = readlinkat_malloc(dirfd(proc_fd_dir), dent->d_name, &fdname);
+                r = readlinkat_malloc(dirfd(proc_fd_dir), de->d_name, &fdname);
                 if (r < 0)
                         return r;
 
-                fprintf(stream, "%s%s:%s\n", fddelim, dent->d_name, fdname);
+                fprintf(stream, "%s%s:%s\n", fddelim, de->d_name, fdname);
                 fddelim = "\n";
 
                 /* Use the directory entry from /proc/[pid]/fd with /proc/[pid]/fdinfo */
-                fd = openat(proc_fdinfo_fd, dent->d_name, O_NOFOLLOW|O_CLOEXEC|O_RDONLY);
+                fd = openat(proc_fdinfo_fd, de->d_name, O_NOFOLLOW|O_CLOEXEC|O_RDONLY);
                 if (fd < 0)
                         continue;
 
@@ -707,10 +701,10 @@ static int get_mount_namespace_leader(pid_t pid, pid_t *ret) {
  * Returns a negative number on errors.
  */
 static int get_process_container_parent_cmdline(pid_t pid, char** cmdline) {
-        int r = 0;
         pid_t container_pid;
         const char *proc_root_path;
         struct stat root_stat, proc_root_stat;
+        int r;
 
         /* To compare inodes of / and /proc/[pid]/root */
         if (stat("/", &root_stat) < 0)
@@ -778,6 +772,7 @@ static int submit_coredump(
         bool truncated = false;
         JsonVariant *module_json;
         int r;
+
         assert(context);
         assert(iovw);
         assert(input_fd >= 0);
@@ -799,10 +794,9 @@ static int submit_coredump(
         r = maybe_remove_external_coredump(filename, coredump_node_fd >= 0 ? coredump_compressed_size : coredump_size);
         if (r < 0)
                 return r;
-        if (r == 0) {
+        if (r == 0)
                 (void) iovw_put_string_field(iovw, "COREDUMP_FILENAME=", filename);
-
-        } else if (arg_storage == COREDUMP_STORAGE_EXTERNAL)
+        else if (arg_storage == COREDUMP_STORAGE_EXTERNAL)
                 log_info("The core will not be stored: size %"PRIu64" is greater than %"PRIu64" (the configured maximum)",
                          coredump_node_fd >= 0 ? coredump_compressed_size : coredump_size, arg_external_size_max);
 
@@ -818,15 +812,20 @@ static int submit_coredump(
         if (r < 0)
                 return log_error_errno(r, "Failed to drop privileges: %m");
 
-#if HAVE_ELFUTILS
         /* Try to get a stack trace if we can */
-        if (coredump_size > arg_process_size_max) {
+        if (coredump_size > arg_process_size_max)
                 log_debug("Not generating stack trace: core size %"PRIu64" is greater "
                           "than %"PRIu64" (the configured maximum)",
                           coredump_size, arg_process_size_max);
-        } else if (coredump_fd >= 0)
-                coredump_parse_core(coredump_fd, context->meta[META_EXE], &stacktrace, &json_metadata);
-#endif
+        else if (coredump_fd >= 0) {
+                bool skip = startswith(context->meta[META_COMM], "systemd-coredum"); /* COMM is 16 bytes usually */
+
+                (void) parse_elf_object(coredump_fd,
+                                        context->meta[META_EXE],
+                                        /* fork_disable_dump= */ skip, /* avoid loops */
+                                        &stacktrace,
+                                        &json_metadata);
+        }
 
 log:
         core_message = strjoina("Process ", context->meta[META_ARGV_PID],
@@ -861,21 +860,24 @@ log:
                 (void) iovw_put_string_field(iovw, "COREDUMP_PACKAGE_JSON=", formatted_json);
         }
 
-        JSON_VARIANT_OBJECT_FOREACH(module_name, module_json, json_metadata) {
-                JsonVariant *package_name, *package_version;
+        /* In the unlikely scenario that context->meta[META_EXE] is not available,
+         * let's avoid guessing the module name and skip the loop. */
+        if (context->meta[META_EXE])
+                JSON_VARIANT_OBJECT_FOREACH(module_name, module_json, json_metadata) {
+                        JsonVariant *t;
 
-                /* We only add structured fields for the 'main' ELF module */
-                if (!path_equal_filename(module_name, context->meta[META_EXE]))
-                        continue;
+                        /* We only add structured fields for the 'main' ELF module, and only if we can identify it. */
+                        if (!path_equal_filename(module_name, context->meta[META_EXE]))
+                                continue;
 
-                package_name = json_variant_by_key(module_json, "name");
-                if (package_name)
-                        (void) iovw_put_string_field(iovw, "COREDUMP_PACKAGE_NAME=", json_variant_string(package_name));
+                        t = json_variant_by_key(module_json, "name");
+                        if (t)
+                                (void) iovw_put_string_field(iovw, "COREDUMP_PACKAGE_NAME=", json_variant_string(t));
 
-                package_version = json_variant_by_key(module_json, "version");
-                if (package_version)
-                        (void) iovw_put_string_field(iovw, "COREDUMP_PACKAGE_VERSION=", json_variant_string(package_version));
-        }
+                        t = json_variant_by_key(module_json, "version");
+                        if (t)
+                                (void) iovw_put_string_field(iovw, "COREDUMP_PACKAGE_VERSION=", json_variant_string(t));
+                }
 
         /* Optionally store the entire coredump in the journal */
         if (arg_storage == COREDUMP_STORAGE_JOURNAL && coredump_fd >= 0) {
@@ -1185,7 +1187,7 @@ static int gather_pid_metadata(struct iovec_wrapper *iovw, Context *context) {
         if (r < 0)
                 return r;
 
-        /* The following are optional but we used them if present */
+        /* The following are optional, but we use them if present. */
         r = get_process_exe(pid, &t);
         if (r >= 0)
                 r = iovw_put_string_field_free(iovw, "COREDUMP_EXE=", t);
@@ -1195,7 +1197,6 @@ static int gather_pid_metadata(struct iovec_wrapper *iovw, Context *context) {
         if (cg_pid_get_unit(pid, &t) >= 0)
                 (void) iovw_put_string_field_free(iovw, "COREDUMP_UNIT=", t);
 
-        /* The next are optional */
         if (cg_pid_get_user_unit(pid, &t) >= 0)
                 (void) iovw_put_string_field_free(iovw, "COREDUMP_USER_UNIT=", t);
 

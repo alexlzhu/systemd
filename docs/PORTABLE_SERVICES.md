@@ -247,6 +247,20 @@ image. To facilitate 3 and 4 you also need to include a boot loader in the
 image. As mentioned, `mkosi -b` takes care of all of that for you, but any
 other image generator should work too.
 
+The
+[os-release(5)](https://www.freedesktop.org/software/systemd/man/os-release.html)
+file may optionally be extended with a `PORTABLE_PREFIXES=` field listing all
+supported portable service prefixes for the image (see above). This is useful
+for informational purposes (as it allows recognizing portable service images
+from their contents as such), but is also useful to protect the image from
+being used under a wrong name and prefix. This is particularly relevant if the
+images are cryptographically authenticated (via Verity or a similar mechanism)
+as this way the (not necessarily authenticated) image file name can be
+validated against the (authenticated) image contents. If the field is not
+specified the image will work fine, but is not necessarily recognizable as
+portable service image, and any set of units included in the image may be
+attached, there are no restrictions enforced.
+
 ## Extension Images
 
 Portable services can be delivered as one or multiple images that extend the base
@@ -270,9 +284,12 @@ following must be also be observed:
 4. The upper extension(s) image(s) must at least contain one matching unit file each,
    with the right name prefix and suffix (see above).
 
+5. As with the base/OS image, the upper extension(s) image(s) must be a plain
+   sub-directory, a btrfs subvolume or a raw disk image.
+
 ```
 # portablectl attach --extension foobar_0.7.23.raw debian-runtime_11.1.raw foobar
-# portablectl attach --extension barbaz_7.0.23.raw debian-runtime_11.1.raw barbaz
+# portablectl attach --extension barbaz_7.0.23/ debian-runtime_11.1.raw barbaz
 ```
 
 ## Execution Environment

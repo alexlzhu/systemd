@@ -120,7 +120,8 @@ basic_dns_sources += custom_target(
 libsystemd_resolve_core = static_library(
         'systemd-resolve-core',
         basic_dns_sources,
-        include_directories : includes)
+        include_directories : includes,
+        build_by_default : false)
 
 systemd_resolved_sources += custom_target(
         'resolved_gperf.c',
@@ -134,7 +135,7 @@ systemd_resolved_sources += custom_target(
         output : 'resolved-dnssd-gperf.c',
         command : [gperf, '@INPUT@', '--output-file', '@OUTPUT@'])
 
-systemd_resolved_dependencies = [threads, libgpg_error, libm]
+systemd_resolved_dependencies = [threads, libm] + [lib_openssl_or_gcrypt]
 if conf.get('ENABLE_DNS_OVER_TLS') == 1
         if conf.get('DNS_OVER_TLS_USE_GNUTLS') == 1
                 systemd_resolved_sources += files(
@@ -173,57 +174,58 @@ custom_target(
 ############################################################
 
 tests += [
-        [['src/resolve/test-resolve-tables.c'],
+        [files('test-resolve-tables.c'),
          [libsystemd_resolve_core,
           libshared],
-         [libgcrypt,
-          libgpg_error,
+         [lib_openssl_or_gcrypt,
           libm]],
 
-        [['src/resolve/test-dns-packet.c'],
+        [files('test-dns-packet.c'),
          [libsystemd_resolve_core,
           libshared],
-         [libgcrypt,
-          libgpg_error,
+         [lib_openssl_or_gcrypt,
           libm]],
 
-        [['src/resolve/test-resolved-etc-hosts.c',
-          'src/resolve/resolved-etc-hosts.c',
-          'src/resolve/resolved-etc-hosts.h'],
+        [files('test-resolved-etc-hosts.c',
+               'resolved-etc-hosts.c',
+               'resolved-etc-hosts.h'),
          [libsystemd_resolve_core,
           libshared],
-         [libgcrypt,
-          libgpg_error,
+         [lib_openssl_or_gcrypt,
           libm]],
 
-        [['src/resolve/test-resolved-packet.c'],
+        [files('test-resolved-packet.c'),
          [libsystemd_resolve_core,
           libshared],
-         [libgcrypt,
-          libgpg_error,
+         [lib_openssl_or_gcrypt,
           libm]],
 
-        [['src/resolve/test-dnssec.c'],
+        [files('test-dnssec.c'),
          [libsystemd_resolve_core,
           libshared],
-         [libgcrypt,
-          libgpg_error,
-          libm]],
+         [lib_openssl_or_gcrypt,
+          libm],
+         [], 'HAVE_OPENSSL_OR_GCRYPT'],
 
-        [['src/resolve/test-dnssec-complex.c'],
+        [files('test-dnssec-complex.c'),
          [libsystemd_resolve_core,
           libshared],
-         [libgcrypt,
-          libgpg_error,
+         [lib_openssl_or_gcrypt,
           libm],
          [], '', 'manual'],
 ]
 
 fuzzers += [
-        [['src/resolve/fuzz-dns-packet.c'],
+        [files('fuzz-dns-packet.c'),
          [libsystemd_resolve_core,
           libshared],
-         [libgcrypt,
-          libgpg_error,
+         [lib_openssl_or_gcrypt,
+          libm]],
+        [files('fuzz-etc-hosts.c',
+          'resolved-etc-hosts.c',
+          'resolved-etc-hosts.h'),
+         [libsystemd_resolve_core,
+          libshared],
+         [lib_openssl_or_gcrypt,
           libm]],
 ]

@@ -63,6 +63,7 @@
 #include "glob-util.h"
 #include "hexdecoct.h"
 #include "io-util.h"
+#include "ioprio-util.h"
 #include "label.h"
 #include "log.h"
 #include "macro.h"
@@ -79,6 +80,7 @@
 #include "path-util.h"
 #include "process-util.h"
 #include "random-util.h"
+#include "recurse-dir.h"
 #include "rlimit-util.h"
 #include "rm-rf.h"
 #if HAVE_SECCOMP
@@ -1701,29 +1703,6 @@ static int apply_restrict_namespaces(const Unit *u, const ExecContext *c) {
         return seccomp_restrict_namespaces(c->restrict_namespaces);
 }
 
-#if HAVE_LIBBPF
-static bool skip_lsm_bpf_unsupported(const Unit* u, const char* msg) {
-        if (lsm_bpf_supported())
-                return false;
-
-        log_unit_debug(u, "LSM BPF not supported, skipping %s", msg);
-        return true;
-}
-
-static int apply_restrict_filesystems(Unit *u, const ExecContext *c) {
-        assert(u);
-        assert(c);
-
-        if (!exec_context_restrict_filesystems_set(c))
-                return 0;
-
-        if (skip_lsm_bpf_unsupported(u, "RestrictFileSystems="))
-                return 0;
-
-        return lsm_bpf_unit_restrict_filesystems(u, c->restrict_filesystems, c->restrict_filesystems_allow_list);
-}
-#endif
-
 static int apply_lock_personality(const Unit* u, const ExecContext *c) {
         unsigned long personality;
         int r;
@@ -1750,6 +1729,24 @@ static int apply_lock_personality(const Unit* u, const ExecContext *c) {
         return seccomp_lock_personality(personality);
 }
 
+#endif
+
+#if HAVE_LIBBPF
+static int apply_restrict_filesystems(Unit *u, const ExecContext *c) {
+        assert(u);
+        assert(c);
+
+        if (!exec_context_restrict_filesystems_set(c))
+                return 0;
+
+        if (!u->manager->restrict_fs) {
+                /* LSM BPF is unsupported or lsm_bpf_setup failed */
+                log_unit_debug(u, "LSM BPF not supported, skipping RestrictFileSystems=");
+                return 0;
+        }
+
+        return lsm_bpf_unit_restrict_filesystems(u, c->restrict_filesystems, c->restrict_filesystems_allow_list);
+}
 #endif
 
 static int apply_protect_hostname(const Unit *u, const ExecContext *c, int *ret_exit_status) {
@@ -2066,6 +2063,9 @@ bool exec_needs_mount_namespace(
                 return true;
 
         if (context->n_extension_images > 0)
+                return true;
+
+        if (!strv_isempty(context->extension_directories))
                 return true;
 
         if (!IN_SET(context->mount_flags, 0, MS_SHARED))
@@ -2605,6 +2605,168 @@ static int write_credential(
         return 0;
 }
 
+static int load_credential(
+                const ExecContext *context,
+                const ExecParameters *params,
+                ExecLoadCredential *lc,
+                const char *unit,
+                int read_dfd,
+                int write_dfd,
+                uid_t uid,
+                bool ownership_ok,
+                uint64_t *left) {
+
+        assert(context);
+        assert(lc);
+        assert(unit);
+        assert(write_dfd >= 0);
+        assert(left);
+
+        ReadFullFileFlags flags = READ_FULL_FILE_SECURE|READ_FULL_FILE_FAIL_WHEN_LARGER;
+        _cleanup_(erase_and_freep) char *data = NULL;
+        _cleanup_free_ char *j = NULL, *bindname = NULL;
+        bool missing_ok = true;
+        const char *source;
+        size_t size, add;
+        int r;
+
+        if (path_is_absolute(lc->path) || read_dfd >= 0) {
+                /* If this is an absolute path, read the data directly from it, and support AF_UNIX sockets */
+                source = lc->path;
+                flags |= READ_FULL_FILE_CONNECT_SOCKET;
+
+                /* Pass some minimal info about the unit and the credential name we are looking to acquire
+                 * via the source socket address in case we read off an AF_UNIX socket. */
+                if (asprintf(&bindname, "@%" PRIx64"/unit/%s/%s", random_u64(), unit, lc->id) < 0)
+                        return -ENOMEM;
+
+                missing_ok = false;
+
+        } else if (params->received_credentials) {
+                /* If this is a relative path, take it relative to the credentials we received
+                 * ourselves. We don't support the AF_UNIX stuff in this mode, since we are operating
+                 * on a credential store, i.e. this is guaranteed to be regular files. */
+                j = path_join(params->received_credentials, lc->path);
+                if (!j)
+                        return -ENOMEM;
+
+                source = j;
+        } else
+                source = NULL;
+
+        if (source)
+                r = read_full_file_full(
+                                read_dfd, source,
+                                UINT64_MAX,
+                                lc->encrypted ? CREDENTIAL_ENCRYPTED_SIZE_MAX : CREDENTIAL_SIZE_MAX,
+                                flags | (lc->encrypted ? READ_FULL_FILE_UNBASE64 : 0),
+                                bindname,
+                                &data, &size);
+        else
+                r = -ENOENT;
+
+        if (r == -ENOENT && (missing_ok || hashmap_contains(context->set_credentials, lc->id))) {
+                /* Make a missing inherited credential non-fatal, let's just continue. After all apps
+                 * will get clear errors if we don't pass such a missing credential on as they
+                 * themselves will get ENOENT when trying to read them, which should not be much
+                 * worse than when we handle the error here and make it fatal.
+                 *
+                 * Also, if the source file doesn't exist, but a fallback is set via SetCredentials=
+                 * we are fine, too. */
+                log_debug_errno(r, "Couldn't read inherited credential '%s', skipping: %m", lc->path);
+                return 0;
+        }
+        if (r < 0)
+                return log_debug_errno(r, "Failed to read credential '%s': %m", lc->path);
+
+        if (lc->encrypted) {
+                _cleanup_free_ void *plaintext = NULL;
+                size_t plaintext_size = 0;
+
+                r = decrypt_credential_and_warn(lc->id, now(CLOCK_REALTIME), NULL, data, size, &plaintext, &plaintext_size);
+                if (r < 0)
+                        return r;
+
+                free_and_replace(data, plaintext);
+                size = plaintext_size;
+        }
+
+        add = strlen(lc->id) + size;
+        if (add > *left)
+                return -E2BIG;
+
+        r = write_credential(write_dfd, lc->id, data, size, uid, ownership_ok);
+        if (r < 0)
+                return r;
+
+        *left -= add;
+        return 0;
+}
+
+struct load_cred_args {
+        Set *seen_creds;
+
+        const ExecContext *context;
+        const ExecParameters *params;
+        ExecLoadCredential *parent_local_credential;
+        const char *unit;
+        int dfd;
+        uid_t uid;
+        bool ownership_ok;
+        uint64_t *left;
+};
+
+static int load_cred_recurse_dir_cb(
+                RecurseDirEvent event,
+                const char *path,
+                int dir_fd,
+                int inode_fd,
+                const struct dirent *de,
+                const struct statx *sx,
+                void *userdata) {
+
+        _cleanup_free_ char *credname = NULL, *sub_id = NULL;
+        struct load_cred_args *args = userdata;
+        int r;
+
+        if (event != RECURSE_DIR_ENTRY)
+                return RECURSE_DIR_CONTINUE;
+
+        if (!IN_SET(de->d_type, DT_REG, DT_SOCK))
+                return RECURSE_DIR_CONTINUE;
+
+        credname = strreplace(path, "/", "_");
+        if (!credname)
+                return -ENOMEM;
+
+        sub_id = strjoin(args->parent_local_credential->id, "_", credname);
+        if (!sub_id)
+                return -ENOMEM;
+
+        if (!credential_name_valid(sub_id))
+                return -EINVAL;
+
+        if (set_contains(args->seen_creds, sub_id)) {
+                log_debug("Skipping credential with duplicated ID %s at %s", sub_id, path);
+                return RECURSE_DIR_CONTINUE;
+        }
+
+        r = set_put_strdup(&args->seen_creds, sub_id);
+        if (r < 0)
+                return r;
+
+        r = load_credential(args->context, args->params,
+                &(ExecLoadCredential) {
+                        .id = sub_id,
+                        .path = (char *) de->d_name,
+                        .encrypted = args->parent_local_credential->encrypted,
+                }, args->unit, dir_fd, args->dfd, args->uid, args->ownership_ok, args->left);
+        if (r < 0)
+                return r;
+
+        return RECURSE_DIR_CONTINUE;
+}
+
 static int acquire_credentials(
                 const ExecContext *context,
                 const ExecParameters *params,
@@ -2615,6 +2777,7 @@ static int acquire_credentials(
 
         uint64_t left = CREDENTIALS_TOTAL_SIZE_MAX;
         _cleanup_close_ int dfd = -1;
+        _cleanup_set_free_ Set *seen_creds = NULL;
         ExecLoadCredential *lc;
         ExecSetCredential *sc;
         int r;
@@ -2626,84 +2789,53 @@ static int acquire_credentials(
         if (dfd < 0)
                 return -errno;
 
+        seen_creds = set_new(&string_hash_ops_free);
+        if (!seen_creds)
+                return -ENOMEM;
+
         /* First, load credentials off disk (or acquire via AF_UNIX socket) */
         HASHMAP_FOREACH(lc, context->load_credentials) {
-                ReadFullFileFlags flags = READ_FULL_FILE_SECURE|READ_FULL_FILE_FAIL_WHEN_LARGER;
-                _cleanup_(erase_and_freep) char *data = NULL;
-                _cleanup_free_ char *j = NULL, *bindname = NULL;
-                bool missing_ok = true;
-                const char *source;
-                size_t size, add;
+                _cleanup_close_ int sub_fd = -1;
 
-                if (path_is_absolute(lc->path)) {
-                        /* If this is an absolute path, read the data directly from it, and support AF_UNIX sockets */
-                        source = lc->path;
-                        flags |= READ_FULL_FILE_CONNECT_SOCKET;
-
-                        /* Pass some minimal info about the unit and the credential name we are looking to acquire
-                         * via the source socket address in case we read off an AF_UNIX socket. */
-                        if (asprintf(&bindname, "@%" PRIx64"/unit/%s/%s", random_u64(), unit, lc->id) < 0)
-                                return -ENOMEM;
-
-                        missing_ok = false;
-
-                } else if (params->received_credentials) {
-                        /* If this is a relative path, take it relative to the credentials we received
-                         * ourselves. We don't support the AF_UNIX stuff in this mode, since we are operating
-                         * on a credential store, i.e. this is guaranteed to be regular files. */
-                        j = path_join(params->received_credentials, lc->path);
-                        if (!j)
-                                return -ENOMEM;
-
-                        source = j;
-                } else
-                        source = NULL;
-
-                if (source)
-                        r = read_full_file_full(
-                                        AT_FDCWD, source,
-                                        UINT64_MAX,
-                                        lc->encrypted ? CREDENTIAL_ENCRYPTED_SIZE_MAX : CREDENTIAL_SIZE_MAX,
-                                        flags | (lc->encrypted ? READ_FULL_FILE_UNBASE64 : 0),
-                                        bindname,
-                                        &data, &size);
-                else
-                        r = -ENOENT;
-                if (r == -ENOENT && (missing_ok || hashmap_contains(context->set_credentials, lc->id))) {
-                        /* Make a missing inherited credential non-fatal, let's just continue. After all apps
-                         * will get clear errors if we don't pass such a missing credential on as they
-                         * themselves will get ENOENT when trying to read them, which should not be much
-                         * worse than when we handle the error here and make it fatal.
-                         *
-                         * Also, if the source file doesn't exist, but a fallback is set via SetCredentials=
-                         * we are fine, too. */
-                        log_debug_errno(r, "Couldn't read inherited credential '%s', skipping: %m", lc->path);
+                /* Skip over credentials with unspecified paths. These are received by the
+                 * service manager via the $CREDENTIALS_DIRECTORY environment variable. */
+                if (!is_path(lc->path) && streq(lc->id, lc->path))
                         continue;
-                }
-                if (r < 0)
-                        return log_debug_errno(r, "Failed to read credential '%s': %m", lc->path);
 
-                if (lc->encrypted) {
-                        _cleanup_free_ void *plaintext = NULL;
-                        size_t plaintext_size = 0;
+                sub_fd = open(lc->path, O_DIRECTORY|O_CLOEXEC|O_RDONLY);
+                if (sub_fd < 0 && errno != ENOTDIR)
+                        return -errno;
 
-                        r = decrypt_credential_and_warn(lc->id, now(CLOCK_REALTIME), NULL, data, size, &plaintext, &plaintext_size);
+                if (sub_fd < 0) {
+                        r = set_put_strdup(&seen_creds, lc->id);
+                        if (r < 0)
+                                return r;
+                        r = load_credential(context, params, lc, unit, -1, dfd, uid, ownership_ok, &left);
                         if (r < 0)
                                 return r;
 
-                        free_and_replace(data, plaintext);
-                        size = plaintext_size;
+                } else {
+                        r = recurse_dir(
+                                        sub_fd,
+                                        /* path= */ "",
+                                        /* statx_mask= */ 0,
+                                        /* n_depth_max= */ UINT_MAX,
+                                        RECURSE_DIR_IGNORE_DOT|RECURSE_DIR_ENSURE_TYPE,
+                                        load_cred_recurse_dir_cb,
+                                        &(struct load_cred_args) {
+                                                .seen_creds = seen_creds,
+                                                .context = context,
+                                                .params = params,
+                                                .parent_local_credential = lc,
+                                                .unit = unit,
+                                                .dfd = dfd,
+                                                .uid = uid,
+                                                .ownership_ok = ownership_ok,
+                                                .left = &left,
+                                        });
+                        if (r < 0)
+                                return r;
                 }
-
-                add = strlen(lc->id) + size;
-                if (add > left)
-                        return -E2BIG;
-
-                r = write_credential(dfd, lc->id, data, size, uid, ownership_ok);
-                if (r < 0)
-                        return r;
-
-                left -= add;
         }
 
         /* First we use the literally specified credentials. Note that they might be overridden again below,
@@ -3437,6 +3569,7 @@ static int apply_mount_namespace(
                             context->root_verity,
                             context->extension_images,
                             context->n_extension_images,
+                            context->extension_directories,
                             propagate_dir,
                             incoming_dir,
                             root_dir || root_image ? params->notify_socket : NULL,
@@ -3967,13 +4100,11 @@ static int exec_child(
         }
 
 #if HAVE_LIBBPF
-        if (MANAGER_IS_SYSTEM(unit->manager) && lsm_bpf_supported()) {
-                int bpf_map_fd = -1;
-
-                bpf_map_fd = lsm_bpf_map_restrict_fs_fd(unit);
+        if (unit->manager->restrict_fs) {
+                int bpf_map_fd = lsm_bpf_map_restrict_fs_fd(unit);
                 if (bpf_map_fd < 0) {
                         *exit_status = EXIT_FDS;
-                        return log_unit_error_errno(unit, r, "Failed to get restrict filesystems BPF map fd: %m");
+                        return log_unit_error_errno(unit, bpf_map_fd, "Failed to get restrict filesystems BPF map fd: %m");
                 }
 
                 r = add_shifted_fd(keep_fds, ELEMENTSOF(keep_fds), &n_keep_fds, bpf_map_fd, &bpf_map_fd);
@@ -5068,7 +5199,7 @@ void exec_context_init(ExecContext *c) {
         assert(c);
 
         c->umask = 0022;
-        c->ioprio = ioprio_prio_value(IOPRIO_CLASS_BE, 0);
+        c->ioprio = IOPRIO_DEFAULT_CLASS_AND_PRIO;
         c->cpu_sched_policy = SCHED_OTHER;
         c->syslog_priority = LOG_DAEMON|LOG_INFO;
         c->syslog_level_prefix = true;
@@ -5117,6 +5248,7 @@ void exec_context_done(ExecContext *c) {
         c->root_hash_sig_path = mfree(c->root_hash_sig_path);
         c->root_verity = mfree(c->root_verity);
         c->extension_images = mount_image_free_many(c->extension_images, &c->n_extension_images);
+        c->extension_directories = strv_free(c->extension_directories);
         c->tty_path = mfree(c->tty_path);
         c->syslog_identifier = mfree(c->syslog_identifier);
         c->user = mfree(c->user);
@@ -5369,20 +5501,18 @@ static int exec_context_named_iofds(
         return targets == 0 ? 0 : -ENOENT;
 }
 
-static int exec_context_load_environment(const Unit *unit, const ExecContext *c, char ***l) {
-        char **i, **r = NULL;
+static int exec_context_load_environment(const Unit *unit, const ExecContext *c, char ***ret) {
+        _cleanup_strv_free_ char **v = NULL;
+        char **i;
+        int r;
 
         assert(c);
-        assert(l);
+        assert(ret);
 
         STRV_FOREACH(i, c->environment_files) {
-                char *fn;
-                int k;
-                bool ignore = false;
-                char **p;
                 _cleanup_globfree_ glob_t pglob = {};
-
-                fn = *i;
+                bool ignore = false;
+                char *fn = *i;
 
                 if (fn[0] == '-') {
                         ignore = true;
@@ -5392,33 +5522,30 @@ static int exec_context_load_environment(const Unit *unit, const ExecContext *c,
                 if (!path_is_absolute(fn)) {
                         if (ignore)
                                 continue;
-
-                        strv_free(r);
                         return -EINVAL;
                 }
 
                 /* Filename supports globbing, take all matching files */
-                k = safe_glob(fn, 0, &pglob);
-                if (k < 0) {
+                r = safe_glob(fn, 0, &pglob);
+                if (r < 0) {
                         if (ignore)
                                 continue;
-
-                        strv_free(r);
-                        return k;
+                        return r;
                 }
 
                 /* When we don't match anything, -ENOENT should be returned */
                 assert(pglob.gl_pathc > 0);
 
                 for (unsigned n = 0; n < pglob.gl_pathc; n++) {
-                        k = load_env_file(NULL, pglob.gl_pathv[n], &p);
-                        if (k < 0) {
+                        _cleanup_strv_free_ char **p = NULL;
+
+                        r = load_env_file(NULL, pglob.gl_pathv[n], &p);
+                        if (r < 0) {
                                 if (ignore)
                                         continue;
-
-                                strv_free(r);
-                                return k;
+                                return r;
                         }
+
                         /* Log invalid environment variables with filename */
                         if (p) {
                                 InvalidEnvInfo info = {
@@ -5429,23 +5556,19 @@ static int exec_context_load_environment(const Unit *unit, const ExecContext *c,
                                 p = strv_env_clean_with_callback(p, invalid_env, &info);
                         }
 
-                        if (!r)
-                                r = p;
+                        if (!v)
+                                v = TAKE_PTR(p);
                         else {
-                                char **m;
-
-                                m = strv_env_merge(r, p);
-                                strv_free(r);
-                                strv_free(p);
+                                char **m = strv_env_merge(v, p);
                                 if (!m)
                                         return -ENOMEM;
 
-                                r = m;
+                                strv_free_and_replace(v, m);
                         }
                 }
         }
 
-        *l = r;
+        *ret = TAKE_PTR(v);
 
         return 0;
 }
@@ -5993,6 +6116,8 @@ void exec_context_dump(const ExecContext *c, FILE* f, const char *prefix) {
                                 strempty(o->options));
                 fprintf(f, "\n");
         }
+
+        strv_dump(f, prefix, "ExtensionDirectories", c->extension_directories);
 }
 
 bool exec_context_maintains_privileges(const ExecContext *c) {
@@ -6020,9 +6145,9 @@ int exec_context_get_effective_ioprio(const ExecContext *c) {
 
         p = ioprio_get(IOPRIO_WHO_PROCESS, 0);
         if (p < 0)
-                return ioprio_prio_value(IOPRIO_CLASS_BE, 4);
+                return IOPRIO_DEFAULT_CLASS_AND_PRIO;
 
-        return p;
+        return ioprio_normalize(p);
 }
 
 bool exec_context_get_effective_mount_apivfs(const ExecContext *c) {

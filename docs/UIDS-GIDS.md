@@ -81,7 +81,7 @@ available during earliest boot, including in the initial RAM disk).
 above). However, it does define some special group/GID assignments, which are
 primarily used for `systemd-udevd`'s device management. The precise list of the
 currently defined groups is found in this `sysusers.d` snippet:
-[basic.conf](https://raw.githubusercontent.com/systemd/systemd/master/sysusers.d/basic.conf.in)
+[basic.conf](https://raw.githubusercontent.com/systemd/systemd/main/sysusers.d/basic.conf.in)
 
 It's strongly recommended that downstream distributions include these groups in
 their default group databases.
@@ -176,7 +176,7 @@ Systemd has compile-time default for these boundaries. Using those defaults is
 recommended. It will nevertheless query `/etc/login.defs` at runtime, when
 compiled with `-Dcompat-mutable-uid-boundaries=true` and that file is present.
 Support for this is considered only a compatibility feature and should not be
-used except when upgrading systems which were creating with different defaults.
+used except when upgrading systems which were created with different defaults.
 
 ## Considerations for container managers
 
@@ -255,7 +255,7 @@ the artifacts the container manager persistently leaves in the system.
 | 2147483648…4294967294 | HIC SVNT LEONES       |               |                               |
 |            4294967295 | 32bit `(uid_t) -1`    | Linux         |                               |
 
-Note that "Unused" in the table above doesn't meant that these ranges are
+Note that "Unused" in the table above doesn't mean that these ranges are
 really unused. It just means that these ranges have no well-established
 pre-defined purposes between Linux, generic low-level distributions and
 `systemd`. There might very well be other packages that allocate from these

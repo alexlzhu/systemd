@@ -242,6 +242,9 @@ typedef struct Unit {
         /* Queue of units that have a BindTo= dependency on some other unit, and should possibly be shut down */
         LIST_FIELDS(Unit, stop_when_bound_queue);
 
+        /* Queue of units which have triggered an OnFailure= or OnSuccess= dependency job. */
+        LIST_FIELDS(Unit, triggered_by);
+
         /* PIDs we keep an eye on. Note that a unit might have many
          * more, but these are the ones we care enough about to
          * process SIGCHLD for */
@@ -990,8 +993,6 @@ int unit_freeze_vtable_common(Unit *u);
 int unit_thaw_vtable_common(Unit *u);
 
 Condition *unit_find_failed_condition(Unit *u);
-
-bool unit_has_failed_condition_or_assert(Unit *u);
 
 /* Macros which append UNIT= or USER_UNIT= to the message */
 

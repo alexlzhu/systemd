@@ -35,7 +35,7 @@
     <filename>/usr/lib/os-release</filename> files contain operating
     system identification data.</para>
 
-    <para>The basic file format of <filename>os-release</filename> is a newline-separated list of
+    <para>The format of <filename>os-release</filename> is a newline-separated list of
     environment-like shell-compatible variable assignments. It is possible to source the configuration from
     Bourne shell scripts, however, beyond mere variable assignments, no shell features are supported (this
     means variable expansion is explicitly not supported), allowing applications to read the file without
@@ -44,8 +44,8 @@
     0–9. (Assignments that do not include these special characters may be enclosed in quotes too, but this is
     optional.) Shell special characters ("$", quotes, backslash, backtick) must be escaped with backslashes,
     following shell style. All strings should be in UTF-8 encoding, and non-printable characters should not
-    be used. It is not supported to concatenate multiple individually quoted strings. Lines beginning with
-    "#" shall be ignored as comments. Blank lines are permitted and ignored.</para>
+    be used. Concatenation of multiple individually quoted strings is not supported. Lines beginning with "#"
+    are treated as comments. Blank lines are permitted and ignored.</para>
 
     <para>The file <filename>/etc/os-release</filename> takes
     precedence over <filename>/usr/lib/os-release</filename>.
@@ -406,6 +406,29 @@
 
           <para>Examples: <literal>SYSEXT_LEVEL=2</literal>, <literal>SYSEXT_LEVEL=15.14</literal>.
           </para></listitem>
+        </varlistentry>
+
+        <varlistentry>
+          <term><varname>SYSEXT_SCOPE=</varname></term>
+          <listitem><para>Takes a space-separated list of one or more of the strings
+          <literal>system</literal>, <literal>initrd</literal> and <literal>portable</literal>. This field is
+          only supported in <filename>extension-release.d/</filename> files and indicates what environments
+          the system extension is applicable to: i.e. to regular systems, to initial RAM filesystems
+          ("initrd") or to portable service images. If unspecified, <literal>SYSEXT_SCOPE=system
+          portable</literal> is implied, i.e. any system extension without this field is applicable to
+          regular systems and to portable service environments, but not to initrd
+          environments.</para></listitem>
+        </varlistentry>
+
+        <varlistentry>
+          <term><varname>PORTABLE_PREFIXES=</varname></term>
+          <listitem><para>Takes a space-separated list of one or more valid prefix match strings for the
+          <ulink url="https://systemd.io/PORTABLE_SERVICES">Portable Services</ulink> logic. This field
+          serves two purposes: it's informational, identifying portable service images as such (and thus
+          allowing them to be distinguished from other OS images, such as bootable system images); whenever a
+          portable service image is attached the specified or implied portable service prefix is checked
+          against this list, to enforce restrictions how images may be attached to a
+          system.</para></listitem>
         </varlistentry>
       </variablelist>
     </refsect2>

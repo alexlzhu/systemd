@@ -1,5 +1,7 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
 
+#include <sys/utsname.h>
+
 #include "sd-id128.h"
 
 #include "errno-util.h"
@@ -24,9 +26,7 @@ static const char* const cases[] = {
         NULL,
 };
 
-static void test_sysctl_normalize(void) {
-        log_info("/* %s */", __func__);
-
+TEST(sysctl_normalize) {
         const char **s, **expected;
         STRV_FOREACH_PAIR(s, expected, (const char**) cases) {
                 _cleanup_free_ char *t;
@@ -39,8 +39,9 @@ static void test_sysctl_normalize(void) {
         }
 }
 
-static void test_sysctl_read(void) {
-        _cleanup_free_ char *s = NULL, *h = NULL;
+TEST(sysctl_read) {
+        _cleanup_free_ char *s = NULL;
+        struct utsname u;
         sd_id128_t a, b;
         int r;
 
@@ -65,18 +66,11 @@ static void test_sysctl_read(void) {
         s = mfree(s);
 
         assert_se(sysctl_read("kernel/hostname", &s) >= 0);
-        assert_se(gethostname_full(GET_HOSTNAME_ALLOW_NONE|GET_HOSTNAME_ALLOW_LOCALHOST, &h) >= 0);
-        assert_se(streq(s, h));
+        assert_se(uname(&u) >= 0);
+        assert_se(streq_ptr(s, u.nodename));
 
         r = sysctl_write("kernel/hostname", s);
         assert_se(r >= 0 || ERRNO_IS_PRIVILEGE(r) || r == -EROFS);
 }
 
-int main(int argc, char *argv[]) {
-        test_setup_logging(LOG_INFO);
-
-        test_sysctl_normalize();
-        test_sysctl_read();
-
-        return 0;
-}
+DEFINE_TEST_MAIN(LOG_INFO);

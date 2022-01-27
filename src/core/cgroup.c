@@ -1047,6 +1047,26 @@ static uint64_t cgroup_weight_io_to_blkio(uint64_t io_weight) {
                      CGROUP_BLKIO_WEIGHT_MIN, CGROUP_BLKIO_WEIGHT_MAX);
 }
 
+static void set_bfq_weight(Unit *u, const char *controller, uint64_t io_weight) {
+        char buf[DECIMAL_STR_MAX(uint64_t)+STRLEN("\n")];
+        const char *p;
+        uint64_t bfq_weight;
+
+        /* FIXME: drop this function when distro kernels properly support BFQ through "io.weight"
+         * See also: https://github.com/systemd/systemd/pull/13335 and
+         * https://github.com/torvalds/linux/commit/65752aef0a407e1ef17ec78a7fc31ba4e0b360f9. */
+        p = strjoina(controller, ".bfq.weight");
+        /* Adjust to kernel range is 1..1000, the default is 100. */
+        bfq_weight = BFQ_WEIGHT(io_weight);
+
+        xsprintf(buf, "%" PRIu64 "\n", bfq_weight);
+
+        if (set_attribute_and_warn(u, controller, p, buf) >= 0 && io_weight != bfq_weight)
+                log_unit_debug(u, "%sIOWeight=%" PRIu64 " scaled to %s=%" PRIu64,
+                               streq(controller, "blkio") ? "Block" : "",
+                               io_weight, p, bfq_weight);
+}
+
 static void cgroup_apply_io_device_weight(Unit *u, const char *dev_path, uint64_t io_weight) {
         char buf[DECIMAL_STR_MAX(dev_t)*2+2+DECIMAL_STR_MAX(uint64_t)+1];
         dev_t dev;
@@ -1258,21 +1278,26 @@ static int cgroup_apply_devices(Unit *u) {
         return r;
 }
 
-static void set_io_weight(Unit *u, const char *controller, uint64_t weight) {
-        char buf[8+DECIMAL_STR_MAX(uint64_t)+1];
-        const char *p;
+static void set_io_weight(Unit *u, uint64_t weight) {
+        char buf[STRLEN("default \n")+DECIMAL_STR_MAX(uint64_t)];
 
-        p = strjoina(controller, ".weight");
+        assert(u);
+
+        set_bfq_weight(u, "io", weight);
+
         xsprintf(buf, "default %" PRIu64 "\n", weight);
-        (void) set_attribute_and_warn(u, controller, p, buf);
+        (void) set_attribute_and_warn(u, "io", "io.weight", buf);
+}
 
-        /* FIXME: drop this when distro kernels properly support BFQ through "io.weight"
-         * See also: https://github.com/systemd/systemd/pull/13335 and
-         * https://github.com/torvalds/linux/commit/65752aef0a407e1ef17ec78a7fc31ba4e0b360f9.
-         * The range is 1..1000 apparently. */
-        p = strjoina(controller, ".bfq.weight");
-        xsprintf(buf, "%" PRIu64 "\n", (weight + 9) / 10);
-        (void) set_attribute_and_warn(u, controller, p, buf);
+static void set_blkio_weight(Unit *u, uint64_t weight) {
+        char buf[STRLEN("\n")+DECIMAL_STR_MAX(uint64_t)];
+
+        assert(u);
+
+        set_bfq_weight(u, "blkio", weight);
+
+        xsprintf(buf, "%" PRIu64 "\n", weight);
+        (void) set_attribute_and_warn(u, "blkio", "blkio.weight", buf);
 }
 
 static void cgroup_apply_bpf_foreign_program(Unit *u) {
@@ -1386,7 +1411,7 @@ static void cgroup_context_apply(
                 } else
                         weight = CGROUP_WEIGHT_DEFAULT;
 
-                set_io_weight(u, "io", weight);
+                set_io_weight(u, weight);
 
                 if (has_io) {
                         CGroupIODeviceLatency *latency;
@@ -1456,7 +1481,7 @@ static void cgroup_context_apply(
                         else
                                 weight = CGROUP_BLKIO_WEIGHT_DEFAULT;
 
-                        set_io_weight(u, "blkio", weight);
+                        set_blkio_weight(u, weight);
 
                         if (has_io) {
                                 CGroupIODeviceWeight *w;
@@ -3191,7 +3216,7 @@ static int on_cgroup_inotify_event(sd_event_source *s, int fd, uint32_t revents,
 
                 l = read(fd, &buffer, sizeof(buffer));
                 if (l < 0) {
-                        if (IN_SET(errno, EINTR, EAGAIN))
+                        if (ERRNO_IS_TRANSIENT(errno))
                                 return 0;
 
                         return log_error_errno(errno, "Failed to read control group inotify events: %m");
@@ -3228,26 +3253,36 @@ static int cg_bpf_mask_supported(CGroupMask *ret) {
 
         /* BPF-based firewall */
         r = bpf_firewall_supported();
+        if (r < 0)
+                return r;
         if (r > 0)
                 mask |= CGROUP_MASK_BPF_FIREWALL;
 
         /* BPF-based device access control */
         r = bpf_devices_supported();
+        if (r < 0)
+                return r;
         if (r > 0)
                 mask |= CGROUP_MASK_BPF_DEVICES;
 
         /* BPF pinned prog */
         r = bpf_foreign_supported();
+        if (r < 0)
+                return r;
         if (r > 0)
                 mask |= CGROUP_MASK_BPF_FOREIGN;
 
         /* BPF-based bind{4|6} hooks */
         r = bpf_socket_bind_supported();
+        if (r < 0)
+                return r;
         if (r > 0)
                 mask |= CGROUP_MASK_BPF_SOCKET_BIND;
 
         /* BPF-based cgroup_skb/{egress|ingress} hooks */
         r = restrict_network_interfaces_supported();
+        if (r < 0)
+                return r;
         if (r > 0)
                 mask |= CGROUP_MASK_BPF_RESTRICT_NETWORK_INTERFACES;
 

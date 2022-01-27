@@ -50,7 +50,8 @@ liblogind_core = static_library(
         'logind-core',
         liblogind_core_sources,
         include_directories : includes,
-        dependencies : [libacl])
+        dependencies : libacl,
+        build_by_default : false)
 
 loginctl_sources = files('''
         loginctl.c
@@ -100,12 +101,12 @@ endif
 ############################################################
 
 tests += [
-        [['src/login/test-login-shared.c']],
+        [files('test-login-shared.c')],
 
-        [['src/login/test-inhibit.c'],
+        [files('test-inhibit.c'),
          [], [], [], '', 'manual'],
 
-        [['src/login/test-login-tables.c'],
+        [files('test-login-tables.c'),
          [liblogind_core,
           libshared],
          [threads]],

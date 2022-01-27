@@ -3,6 +3,8 @@
 
 option('version-tag', type : 'string',
        description : 'override the git version string')
+option('shared-lib-tag', type : 'string',
+       description : 'override the private shared library version tag (defaults to project version)')
 
 option('mode', type : 'combo', choices : ['developer', 'release'],
        description : 'autoenable features suitable for systemd development/release builds')
@@ -23,6 +25,9 @@ option('link-networkd-shared', type: 'boolean',
        description : 'link systemd-networkd and its helpers to libsystemd-shared.so')
 option('link-timesyncd-shared', type: 'boolean',
        description : 'link systemd-timesyncd and its helpers to libsystemd-shared.so')
+option('link-boot-shared', type: 'boolean',
+       description : 'link bootctl and systemd-bless-boot against libsystemd-shared.so')
+
 option('static-libsystemd', type : 'combo',
        choices : ['false', 'true', 'pic', 'no-pic'],
        description : '''install a static library for libsystemd''')
@@ -174,6 +179,8 @@ option('dbussessionservicedir', type : 'string',
        description : 'D-Bus session service directory')
 option('dbussystemservicedir', type : 'string',
        description : 'D-Bus system service directory')
+option('dbus-interfaces-dir', type : 'string',
+       description : 'export D-Bus introspection XML as standalone files')
 option('pkgconfigdatadir', type : 'string', value : '',
        description : 'directory for arch-independent pkg-config files')
 option('pkgconfiglibdir', type : 'string', value : '',
@@ -380,6 +387,8 @@ option('gnutls', type : 'combo', choices : ['auto', 'true', 'false'],
        description : 'gnutls support')
 option('openssl', type : 'combo', choices : ['auto', 'true', 'false'],
        description : 'openssl support')
+option('cryptolib', type : 'combo', choices : ['auto', 'openssl', 'gcrypt'],
+       description : 'whether to use openssl or gcrypt where both are supported')
 option('p11kit', type : 'combo', choices : ['auto', 'true', 'false'],
        description : 'p11kit support')
 option('libfido2', type : 'combo', choices : ['auto', 'true', 'false'],
@@ -409,15 +418,15 @@ option('dbus', type : 'combo', choices : ['auto', 'true', 'false'],
 
 option('gnu-efi', type : 'combo', choices : ['auto', 'true', 'false'],
        description : 'gnu-efi support for sd-boot')
-option('efi-cc', type : 'array',
-       description : 'the compiler to use for EFI modules')
-option('efi-ld', type : 'string', value : 'ld',
+# Note that LLD does not support PE/COFF relocations
+# https://lists.llvm.org/pipermail/llvm-dev/2021-March/149234.html
+option('efi-ld', type : 'combo', choices : ['auto', 'bfd', 'gold'],
        description : 'the linker to use for EFI modules')
 option('efi-libdir', type : 'string',
        description : 'path to the EFI lib directory')
 option('efi-includedir', type : 'string', value : '/usr/include/efi',
        description : 'path to the EFI header directory')
-option('sbat-distro', type : 'string',
+option('sbat-distro', type : 'string', value : 'auto',
        description : 'SBAT distribution ID, e.g. fedora, or auto for autodetection')
 option('sbat-distro-generation', type : 'integer', value : 1,
        description : 'SBAT distribution generation')

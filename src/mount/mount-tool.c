@@ -601,7 +601,7 @@ static int start_transient_mount(
                 if (r < 0)
                         return bus_log_parse_error(r);
 
-                r = bus_wait_for_jobs_one(w, object, arg_quiet);
+                r = bus_wait_for_jobs_one(w, object, arg_quiet, NULL);
                 if (r < 0)
                         return r;
         }
@@ -710,7 +710,7 @@ static int start_transient_automount(
                 if (r < 0)
                         return bus_log_parse_error(r);
 
-                r = bus_wait_for_jobs_one(w, object, arg_quiet);
+                r = bus_wait_for_jobs_one(w, object, arg_quiet, NULL);
                 if (r < 0)
                         return r;
         }
@@ -777,7 +777,6 @@ static int find_mount_points(const char *what, char ***list) {
 
 static int find_loop_device(const char *backing_file, char **loop_dev) {
         _cleanup_closedir_ DIR *d = NULL;
-        struct dirent *de;
         _cleanup_free_ char *l = NULL;
 
         assert(backing_file);
@@ -876,7 +875,7 @@ static int stop_mount(
                 if (r < 0)
                         return bus_log_parse_error(r);
 
-                r = bus_wait_for_jobs_one(w, object, arg_quiet);
+                r = bus_wait_for_jobs_one(w, object, arg_quiet, NULL);
                 if (r < 0)
                         return r;
         }

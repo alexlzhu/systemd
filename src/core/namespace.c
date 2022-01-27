@@ -57,12 +57,13 @@ typedef enum MountMode {
         EMPTY_DIR,
         SYSFS,
         PROCFS,
-        RUN,
         READONLY,
         READWRITE,
         NOEXEC,
         EXEC,
         TMPFS,
+        RUN,
+        EXTENSION_DIRECTORIES, /* Bind-mounted outside the root directory, and used by subsequent mounts */
         EXTENSION_IMAGES, /* Mounted outside the root directory, and used by subsequent mounts */
         MQUEUEFS,
         READWRITE_IMPLICIT, /* Should have the lowest priority. */
@@ -101,7 +102,7 @@ static const MountEntry apivfs_table[] = {
 };
 
 /* ProtectKernelTunables= option and the related filesystem APIs */
-static const MountEntry protect_kernel_tunables_table[] = {
+static const MountEntry protect_kernel_tunables_proc_table[] = {
         { "/proc/acpi",          READONLY,           true  },
         { "/proc/apm",           READONLY,           true  }, /* Obsolete API, there's no point in permitting access to this, ever */
         { "/proc/asound",        READONLY,           true  },
@@ -116,6 +117,9 @@ static const MountEntry protect_kernel_tunables_table[] = {
         { "/proc/sys",           READONLY,           true  },
         { "/proc/sysrq-trigger", READONLY,           true  },
         { "/proc/timer_stats",   READONLY,           true  },
+};
+
+static const MountEntry protect_kernel_tunables_sys_table[] = {
         { "/sys",                READONLY,           false },
         { "/sys/fs/bpf",         READONLY,           true  },
         { "/sys/fs/cgroup",      READWRITE_IMPLICIT, false }, /* READONLY is set by ProtectControlGroups= option */
@@ -133,8 +137,11 @@ static const MountEntry protect_kernel_modules_table[] = {
 };
 
 /* ProtectKernelLogs= option */
-static const MountEntry protect_kernel_logs_table[] = {
+static const MountEntry protect_kernel_logs_proc_table[] = {
         { "/proc/kmsg",          INACCESSIBLE, true },
+};
+
+static const MountEntry protect_kernel_logs_dev_table[] = {
         { "/dev/kmsg",           INACCESSIBLE, true },
 };
 
@@ -402,22 +409,23 @@ static int append_mount_images(MountEntry **p, const MountImage *mount_images, s
         return 0;
 }
 
-static int append_extension_images(
+static int append_extensions(
                 MountEntry **p,
                 const char *root,
                 const char *extension_dir,
                 char **hierarchies,
                 const MountImage *mount_images,
-                size_t n) {
+                size_t n,
+                char **extension_directories) {
 
         _cleanup_strv_free_ char **overlays = NULL;
-        char **hierarchy;
+        char **hierarchy, **extension_directory;
         int r;
 
         assert(p);
         assert(extension_dir);
 
-        if (n == 0)
+        if (n == 0 && strv_isempty(extension_directories))
                 return 0;
 
         /* Prepare a list of overlays, that will have as each element a string suitable for being
@@ -473,6 +481,62 @@ static int append_extension_images(
                         .source_const = m->source,
                         .mode = EXTENSION_IMAGES,
                         .has_prefix = true,
+                };
+        }
+
+        /* Secondly, extend the lowerdir= parameters with each ExtensionDirectory.
+         * Bind mount them in the same location as the ExtensionImages, so that we
+         * can check that they are valid trees (extension-release.d). */
+        STRV_FOREACH(extension_directory, extension_directories) {
+                _cleanup_free_ char *mount_point = NULL, *source = NULL;
+                const char *e = *extension_directory;
+                bool ignore_enoent = false;
+
+                /* Pick up the counter where the ExtensionImages left it. */
+                r = asprintf(&mount_point, "%s/%zu", extension_dir, n++);
+                if (r < 0)
+                        return -ENOMEM;
+
+                /* Look for any prefixes */
+                if (startswith(e, "-")) {
+                        e++;
+                        ignore_enoent = true;
+                }
+                /* Ignore this for now */
+                if (startswith(e, "+"))
+                        e++;
+
+                source = strdup(e);
+                if (!source)
+                        return -ENOMEM;
+
+                for (size_t j = 0; hierarchies && hierarchies[j]; ++j) {
+                        _cleanup_free_ char *prefixed_hierarchy = NULL, *escaped = NULL, *lowerdir = NULL;
+
+                        prefixed_hierarchy = path_join(mount_point, hierarchies[j]);
+                        if (!prefixed_hierarchy)
+                                return -ENOMEM;
+
+                        escaped = shell_escape(prefixed_hierarchy, ",:");
+                        if (!escaped)
+                                return -ENOMEM;
+
+                        /* Note that lowerdir= parameters are in 'reverse' order, so the
+                         * top-most directory in the overlay comes first in the list. */
+                        lowerdir = strjoin(escaped, ":", overlays[j]);
+                        if (!lowerdir)
+                                return -ENOMEM;
+
+                        free_and_replace(overlays[j], lowerdir);
+                }
+
+                *((*p)++) = (MountEntry) {
+                        .path_malloc = TAKE_PTR(mount_point),
+                        .source_const = TAKE_PTR(source),
+                        .mode = EXTENSION_DIRECTORIES,
+                        .ignore = ignore_enoent,
+                        .has_prefix = true,
+                        .read_only = true,
                 };
         }
 
@@ -599,9 +663,12 @@ static int append_protect_system(MountEntry **p, ProtectSystem protect_system, b
 static int mount_path_compare(const MountEntry *a, const MountEntry *b) {
         int d;
 
-        /* EXTENSION_IMAGES will be used by other mounts as a base, so sort them first
+        /* ExtensionImages/Directories will be used by other mounts as a base, so sort them first
          * regardless of the prefix - they are set up in the propagate directory anyway */
         d = -CMP(a->mode == EXTENSION_IMAGES, b->mode == EXTENSION_IMAGES);
+        if (d != 0)
+                return d;
+        d = -CMP(a->mode == EXTENSION_DIRECTORIES, b->mode == EXTENSION_DIRECTORIES);
         if (d != 0)
                 return d;
 
@@ -751,8 +818,8 @@ static void drop_outside_root(const char *root_directory, MountEntry *m, size_t 
 
         for (f = m, t = m; f < m + *n; f++) {
 
-                /* ExtensionImages bases are opened in /run/systemd/unit-extensions on the host */
-                if (f->mode != EXTENSION_IMAGES && !path_startswith(mount_entry_path(f), root_directory)) {
+                /* ExtensionImages/Directories bases are opened in /run/systemd/unit-extensions on the host */
+                if (!IN_SET(f->mode, EXTENSION_IMAGES, EXTENSION_DIRECTORIES) && !path_startswith(mount_entry_path(f), root_directory)) {
                         log_debug("%s is outside of root directory.", mount_entry_path(f));
                         mount_entry_done(f);
                         continue;
@@ -1145,11 +1212,13 @@ static int mount_image(const MountEntry *m, const char *root_directory) {
                                 NULL);
                 if (r < 0)
                         return log_debug_errno(r, "Failed to acquire 'os-release' data of OS tree '%s': %m", empty_to_root(root_directory));
+                if (isempty(host_os_release_id))
+                        return log_debug_errno(SYNTHETIC_ERRNO(EINVAL), "'ID' field not found or empty in 'os-release' data of OS tree '%s': %m", empty_to_root(root_directory));
         }
 
         r = verity_dissect_and_mount(
                                 mount_entry_source(m), mount_entry_path(m), m->image_options,
-                                host_os_release_id, host_os_release_version_id, host_os_release_sysext_level);
+                                host_os_release_id, host_os_release_version_id, host_os_release_sysext_level, NULL);
         if (r == -ENOENT && m->ignore)
                 return 0;
         if (r == -ESTALE && host_os_release_id)
@@ -1287,6 +1356,47 @@ static int apply_one_mount(
                 /* This isn't a mount point yet, let's make it one. */
                 what = mount_entry_path(m);
                 break;
+
+        case EXTENSION_DIRECTORIES: {
+                _cleanup_free_ char *host_os_release_id = NULL, *host_os_release_version_id = NULL,
+                                *host_os_release_sysext_level = NULL, *extension_name = NULL;
+                _cleanup_strv_free_ char **extension_release = NULL;
+
+                r = path_extract_filename(mount_entry_source(m), &extension_name);
+                if (r < 0)
+                        return log_debug_errno(r, "Failed to extract extension name from %s: %m", mount_entry_source(m));
+
+                r = parse_os_release(
+                                empty_to_root(root_directory),
+                                "ID", &host_os_release_id,
+                                "VERSION_ID", &host_os_release_version_id,
+                                "SYSEXT_LEVEL", &host_os_release_sysext_level,
+                                NULL);
+                if (r < 0)
+                        return log_debug_errno(r, "Failed to acquire 'os-release' data of OS tree '%s': %m", empty_to_root(root_directory));
+                if (isempty(host_os_release_id))
+                        return log_debug_errno(SYNTHETIC_ERRNO(EINVAL), "'ID' field not found or empty in 'os-release' data of OS tree '%s': %m", empty_to_root(root_directory));
+
+                r = load_extension_release_pairs(mount_entry_source(m), extension_name, &extension_release);
+                if (r == -ENOENT && m->ignore)
+                        return 0;
+                if (r < 0)
+                        return log_debug_errno(r, "Failed to parse directory %s extension-release metadata: %m", extension_name);
+
+                r = extension_release_validate(
+                                extension_name,
+                                host_os_release_id,
+                                host_os_release_version_id,
+                                host_os_release_sysext_level,
+                                /* host_sysext_scope */ NULL, /* Leave empty, we need to accept both system and portable */
+                                extension_release);
+                if (r == 0)
+                        return log_debug_errno(SYNTHETIC_ERRNO(ESTALE), "Directory %s extension-release metadata does not match the root's", extension_name);
+                if (r < 0)
+                        return log_debug_errno(r, "Failed to compare directory %s extension-release metadata with the root's os-release: %m", extension_name);
+
+                _fallthrough_;
+        }
 
         case BIND_MOUNT:
                 rbind = false;
@@ -1517,6 +1627,7 @@ static size_t namespace_calculate_mounts(
                 size_t n_temporary_filesystems,
                 size_t n_mount_images,
                 size_t n_extension_images,
+                size_t n_extension_directories,
                 size_t n_hierarchies,
                 const char* tmp_dir,
                 const char* var_tmp_dir,
@@ -1551,12 +1662,15 @@ static size_t namespace_calculate_mounts(
                 strv_length(empty_directories) +
                 n_bind_mounts +
                 n_mount_images +
-                (n_extension_images > 0 ? n_hierarchies + n_extension_images : 0) + /* Mount each image plus an overlay per hierarchy */
+                (n_extension_images > 0 || n_extension_directories > 0 ? /* Mount each image and directory plus an overlay per hierarchy */
+                        n_hierarchies + n_extension_images + n_extension_directories: 0) +
                 n_temporary_filesystems +
                 ns_info->private_dev +
-                (ns_info->protect_kernel_tunables ? ELEMENTSOF(protect_kernel_tunables_table) : 0) +
+                (ns_info->protect_kernel_tunables ?
+                 ELEMENTSOF(protect_kernel_tunables_proc_table) + ELEMENTSOF(protect_kernel_tunables_sys_table) : 0) +
                 (ns_info->protect_kernel_modules ? ELEMENTSOF(protect_kernel_modules_table) : 0) +
-                (ns_info->protect_kernel_logs ? ELEMENTSOF(protect_kernel_logs_table) : 0) +
+                (ns_info->protect_kernel_logs ?
+                 ELEMENTSOF(protect_kernel_logs_proc_table) + ELEMENTSOF(protect_kernel_logs_dev_table) : 0) +
                 (ns_info->protect_control_groups ? 1 : 0) +
                 protect_home_cnt + protect_system_cnt +
                 (ns_info->protect_hostname ? 2 : 0) +
@@ -1568,7 +1682,14 @@ static size_t namespace_calculate_mounts(
                 ns_info->private_ipc; /* /dev/mqueue */
 }
 
-static void normalize_mounts(const char *root_directory, MountEntry *mounts, size_t *n_mounts) {
+/* Walk all mount entries and dropping any unused mounts. This affects all
+ * mounts:
+ * - that are implicitly protected by a path that has been rendered inaccessible
+ * - whose immediate parent requests the same protection mode as the mount itself
+ * - that are outside of the relevant root directory
+ * - which are duplicates
+ */
+static void drop_unused_mounts(const char *root_directory, MountEntry *mounts, size_t *n_mounts) {
         assert(root_directory);
         assert(n_mounts);
         assert(mounts || *n_mounts == 0);
@@ -1645,8 +1766,8 @@ static int apply_mounts(
                         if (m->applied)
                                 continue;
 
-                        /* ExtensionImages are first opened in the propagate directory, not in the root_directory */
-                        r = follow_symlink(m->mode != EXTENSION_IMAGES ? root : NULL, m);
+                        /* ExtensionImages/Directories are first opened in the propagate directory, not in the root_directory */
+                        r = follow_symlink(!IN_SET(m->mode, EXTENSION_IMAGES, EXTENSION_DIRECTORIES) ? root : NULL, m);
                         if (r < 0) {
                                 if (error_path && mount_entry_path(m))
                                         *error_path = strdup(mount_entry_path(m));
@@ -1674,7 +1795,7 @@ static int apply_mounts(
                 if (!again)
                         break;
 
-                normalize_mounts(root, mounts, n_mounts);
+                drop_unused_mounts(root, mounts, n_mounts);
         }
 
         /* Now that all filesystems have been set up, but before the
@@ -1869,6 +1990,7 @@ int setup_namespace(
                 const char *verity_data_path,
                 const MountImage *extension_images,
                 size_t n_extension_images,
+                char **extension_directories,
                 const char *propagate_dir,
                 const char *incoming_dir,
                 const char *notify_socket,
@@ -1982,7 +2104,7 @@ int setup_namespace(
                 require_prefix = true;
         }
 
-        if (n_extension_images > 0) {
+        if (n_extension_images > 0 || !strv_isempty(extension_directories)) {
                 r = parse_env_extension_hierarchies(&hierarchies);
                 if (r < 0)
                         return r;
@@ -2000,6 +2122,7 @@ int setup_namespace(
                         n_temporary_filesystems,
                         n_mount_images,
                         n_extension_images,
+                        strv_length(extension_directories),
                         strv_length(hierarchies),
                         tmp_dir, var_tmp_dir,
                         creds_path,
@@ -2068,7 +2191,7 @@ int setup_namespace(
                 if (r < 0)
                         goto finish;
 
-                r = append_extension_images(&m, root, extension_dir, hierarchies, extension_images, n_extension_images);
+                r = append_extensions(&m, root, extension_dir, hierarchies, extension_images, n_extension_images, extension_directories);
                 if (r < 0)
                         goto finish;
 
@@ -2079,10 +2202,21 @@ int setup_namespace(
                                 .flags = DEV_MOUNT_OPTIONS,
                         };
 
+                /* In case /proc is successfully mounted with pid tree subset only (ProcSubset=pid), the
+                   protective mounts to non-pid /proc paths would fail. But the pid only option may have
+                   failed gracefully, so let's try the mounts but it's not fatal if they don't succeed. */
+                bool ignore_protect_proc = ns_info->ignore_protect_paths || ns_info->proc_subset == PROC_SUBSET_PID;
                 if (ns_info->protect_kernel_tunables) {
                         r = append_static_mounts(&m,
-                                                 protect_kernel_tunables_table,
-                                                 ELEMENTSOF(protect_kernel_tunables_table),
+                                                 protect_kernel_tunables_proc_table,
+                                                 ELEMENTSOF(protect_kernel_tunables_proc_table),
+                                                 ignore_protect_proc);
+                        if (r < 0)
+                                goto finish;
+
+                        r = append_static_mounts(&m,
+                                                 protect_kernel_tunables_sys_table,
+                                                 ELEMENTSOF(protect_kernel_tunables_sys_table),
                                                  ns_info->ignore_protect_paths);
                         if (r < 0)
                                 goto finish;
@@ -2099,8 +2233,15 @@ int setup_namespace(
 
                 if (ns_info->protect_kernel_logs) {
                         r = append_static_mounts(&m,
-                                                 protect_kernel_logs_table,
-                                                 ELEMENTSOF(protect_kernel_logs_table),
+                                                 protect_kernel_logs_proc_table,
+                                                 ELEMENTSOF(protect_kernel_logs_proc_table),
+                                                 ignore_protect_proc);
+                        if (r < 0)
+                                goto finish;
+
+                        r = append_static_mounts(&m,
+                                                 protect_kernel_logs_dev_table,
+                                                 ELEMENTSOF(protect_kernel_logs_dev_table),
                                                  ns_info->ignore_protect_paths);
                         if (r < 0)
                                 goto finish;
@@ -2129,14 +2270,19 @@ int setup_namespace(
                                 goto finish;
                 }
 
+                /* Note, if proc is mounted with subset=pid then neither of the
+                 * two paths will exist, i.e. they are implicitly protected by
+                 * the mount option. */
                 if (ns_info->protect_hostname) {
                         *(m++) = (MountEntry) {
                                 .path_const = "/proc/sys/kernel/hostname",
                                 .mode = READONLY,
+                                .ignore = ignore_protect_proc,
                         };
                         *(m++) = (MountEntry) {
                                 .path_const = "/proc/sys/kernel/domainname",
                                 .mode = READONLY,
+                                .ignore = ignore_protect_proc,
                         };
                 }
 
@@ -2217,7 +2363,7 @@ int setup_namespace(
                 if (r < 0)
                         goto finish;
 
-                normalize_mounts(root, mounts, &n_mounts);
+                drop_unused_mounts(root, mounts, &n_mounts);
         }
 
         /* All above is just preparation, figuring out what to do. Let's now actually start doing something. */
@@ -2499,6 +2645,7 @@ int temporary_filesystem_add(
 
 static int make_tmp_prefix(const char *prefix) {
         _cleanup_free_ char *t = NULL;
+        _cleanup_close_ int fd = -1;
         int r;
 
         /* Don't do anything unless we know the dir is actually missing */
@@ -2517,18 +2664,20 @@ static int make_tmp_prefix(const char *prefix) {
         if (r < 0)
                 return r;
 
-        if (mkdir(t, 0777) < 0) /* umask will corrupt this access mode, but that doesn't matter, we need to
-                                 * call chmod() anyway for the suid bit, below. */
-                return -errno;
+        /* umask will corrupt this access mode, but that doesn't matter, we need to call chmod() anyway for
+         * the suid bit, below. */
+        fd = open_mkdir_at(AT_FDCWD, t, O_EXCL|O_CLOEXEC, 0777);
+        if (fd < 0)
+                return fd;
 
-        if (chmod(t, 01777) < 0) {
-                r = -errno;
+        r = RET_NERRNO(fchmod(fd, 01777));
+        if (r < 0) {
                 (void) rmdir(t);
                 return r;
         }
 
-        if (rename(t, prefix) < 0) {
-                r = -errno;
+        r = RET_NERRNO(rename(t, prefix));
+        if (r < 0) {
                 (void) rmdir(t);
                 return r == -EEXIST ? 0 : r; /* it's fine if someone else created the dir by now */
         }

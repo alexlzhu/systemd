@@ -13,6 +13,7 @@
 
 #include "alloc-util.h"
 #include "analyze-condition.h"
+#include "analyze-elf.h"
 #include "analyze-security.h"
 #include "analyze-verify.h"
 #include "bus-error.h"
@@ -105,6 +106,7 @@ static usec_t arg_base_time = USEC_INFINITY;
 static char *arg_unit = NULL;
 static JsonFormatFlags arg_json_format_flags = JSON_FORMAT_OFF;
 static bool arg_quiet = false;
+static char *arg_profile = NULL;
 
 STATIC_DESTRUCTOR_REGISTER(arg_dot_from_patterns, strv_freep);
 STATIC_DESTRUCTOR_REGISTER(arg_dot_to_patterns, strv_freep);
@@ -112,6 +114,7 @@ STATIC_DESTRUCTOR_REGISTER(arg_root, freep);
 STATIC_DESTRUCTOR_REGISTER(arg_image, freep);
 STATIC_DESTRUCTOR_REGISTER(arg_security_policy, freep);
 STATIC_DESTRUCTOR_REGISTER(arg_unit, freep);
+STATIC_DESTRUCTOR_REGISTER(arg_profile, freep);
 
 typedef struct BootTimes {
         usec_t firmware_time;
@@ -979,7 +982,7 @@ static int list_dependencies_one(sd_bus *bus, const char *name, unsigned level, 
                 return r;
 
         STRV_FOREACH(c, deps) {
-                times = hashmap_get(unit_times_hashmap, *c);
+                times = hashmap_get(unit_times_hashmap, *c); /* lgtm [cpp/inconsistent-null-check] */
                 if (times_in_range(times, boot) && times->activated >= service_longest)
                         service_longest = times->activated;
         }
@@ -988,7 +991,7 @@ static int list_dependencies_one(sd_bus *bus, const char *name, unsigned level, 
                 return r;
 
         STRV_FOREACH(c, deps) {
-                times = hashmap_get(unit_times_hashmap, *c);
+                times = hashmap_get(unit_times_hashmap, *c); /* lgtm [cpp/inconsistent-null-check] */
                 if (times_in_range(times, boot) && service_longest - times->activated <= arg_fuzz)
                         to_print++;
         }
@@ -997,7 +1000,7 @@ static int list_dependencies_one(sd_bus *bus, const char *name, unsigned level, 
                 return r;
 
         STRV_FOREACH(c, deps) {
-                times = hashmap_get(unit_times_hashmap, *c);
+                times = hashmap_get(unit_times_hashmap, *c); /* lgtm [cpp/inconsistent-null-check] */
                 if (!times_in_range(times, boot) || service_longest - times->activated > arg_fuzz)
                         continue;
 
@@ -1957,7 +1960,7 @@ static int dump_filesystems(int argc, char *argv[], void *userdata) {
                                 const statfs_f_type_t *magic;
                                 bool is_primary = false;
 
-                                assert(fs_type_from_string(*filesystem, &magic) >= 0);
+                                assert_se(fs_type_from_string(*filesystem, &magic) >= 0);
 
                                 for (size_t i = 0; magic[i] != 0; i++) {
                                         const char *primary;
@@ -2389,9 +2392,11 @@ static int do_security(int argc, char *argv[], void *userdata) {
         int r;
         unsigned line, column;
 
-        r = acquire_bus(&bus, NULL);
-        if (r < 0)
-                return bus_log_connect_error(r, arg_transport);
+        if (!arg_offline) {
+                r = acquire_bus(&bus, NULL);
+                if (r < 0)
+                        return bus_log_connect_error(r, arg_transport);
+        }
 
         pager_open(arg_pager_flags);
 
@@ -2423,9 +2428,16 @@ static int do_security(int argc, char *argv[], void *userdata) {
                                 arg_offline,
                                 arg_threshold,
                                 arg_root,
+                                arg_profile,
                                 arg_json_format_flags,
                                 arg_pager_flags,
                                 /*flags=*/ 0);
+}
+
+static int do_elf_inspection(int argc, char *argv[], void *userdata) {
+        pager_open(arg_pager_flags);
+
+        return analyze_elf(strv_skip(argv, 1), arg_json_format_flags);
 }
 
 static int help(int argc, char *argv[], void *userdata) {
@@ -2470,6 +2482,7 @@ static int help(int argc, char *argv[], void *userdata) {
                "  timestamp TIMESTAMP...     Validate a timestamp\n"
                "  timespan SPAN...           Validate a time span\n"
                "  security [UNIT...]         Analyze security of unit\n"
+               "  inspect-elf FILE...        Parse and print ELF package metadata\n"
                "\nOptions:\n"
                "     --recursive-errors=MODE Control which units are verified\n"
                "     --offline=BOOL          Perform a security review on unit file(s)\n"
@@ -2497,6 +2510,8 @@ static int help(int argc, char *argv[], void *userdata) {
                "     --iterations=N          Show the specified number of iterations\n"
                "     --base-time=TIMESTAMP   Calculate calendar times relative to\n"
                "                             specified time\n"
+               "     --profile=name|PATH     Include the specified profile in the\n"
+               "                             security review of the unit(s)\n"
                "  -h --help                  Show this help\n"
                "     --version               Show package version\n"
                "  -q --quiet                 Do not emit hints\n"
@@ -2536,6 +2551,7 @@ static int parse_argv(int argc, char *argv[]) {
                 ARG_THRESHOLD,
                 ARG_SECURITY_POLICY,
                 ARG_JSON,
+                ARG_PROFILE,
         };
 
         static const struct option options[] = {
@@ -2565,6 +2581,7 @@ static int parse_argv(int argc, char *argv[]) {
                 { "base-time",        required_argument, NULL, ARG_BASE_TIME        },
                 { "unit",             required_argument, NULL, 'U'                  },
                 { "json",             required_argument, NULL, ARG_JSON             },
+                { "profile",          required_argument, NULL, ARG_PROFILE          },
                 {}
         };
 
@@ -2713,6 +2730,24 @@ static int parse_argv(int argc, char *argv[]) {
 
                         break;
 
+                case ARG_PROFILE:
+                        if (isempty(optarg))
+                                return log_error_errno(SYNTHETIC_ERRNO(EINVAL), "Profile file name is empty");
+
+                        if (is_path(optarg)) {
+                                r = parse_path_argument(optarg, /* suppress_root= */ false, &arg_profile);
+                                if (r < 0)
+                                        return r;
+                                if (!endswith(arg_profile, ".conf"))
+                                        return log_error_errno(SYNTHETIC_ERRNO(EINVAL), "Profile file name must end with .conf: %s", arg_profile);
+                        } else {
+                                r = free_and_strdup(&arg_profile, optarg);
+                                if (r < 0)
+                                        return log_oom();
+                        }
+
+                        break;
+
                 case 'U': {
                         _cleanup_free_ char *mangled = NULL;
 
@@ -2734,7 +2769,7 @@ static int parse_argv(int argc, char *argv[]) {
                 return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
                                        "Option --offline= is only supported for security right now.");
 
-        if (arg_json_format_flags != JSON_FORMAT_OFF && !streq_ptr(argv[optind], "security"))
+        if (arg_json_format_flags != JSON_FORMAT_OFF && !STRPTR_IN_SET(argv[optind], "security", "inspect-elf"))
                 return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
                                        "Option --json= is only supported for security right now.");
 
@@ -2810,6 +2845,7 @@ static int run(int argc, char *argv[]) {
                 { "timestamp",         2,        VERB_ANY, 0,            test_timestamp         },
                 { "timespan",          2,        VERB_ANY, 0,            dump_timespan          },
                 { "security",          VERB_ANY, VERB_ANY, 0,            do_security            },
+                { "inspect-elf",       2,        VERB_ANY, 0,            do_elf_inspection      },
                 {}
         };
 

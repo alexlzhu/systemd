@@ -13,6 +13,7 @@
 #include "errno-util.h"
 #include "escape.h"
 #include "fd-util.h"
+#include "id128-util.h"
 #include "log.h"
 #include "macro.h"
 #include "parse-util.h"
@@ -337,6 +338,7 @@ bool device_for_action(sd_device *dev, sd_device_action_t a) {
 
 void log_device_uevent(sd_device *device, const char *str) {
         sd_device_action_t action = _SD_DEVICE_ACTION_INVALID;
+        sd_id128_t event_id = SD_ID128_NULL;
         uint64_t seqnum = 0;
 
         if (!DEBUG_LOGGING)
@@ -344,9 +346,12 @@ void log_device_uevent(sd_device *device, const char *str) {
 
         (void) sd_device_get_seqnum(device, &seqnum);
         (void) sd_device_get_action(device, &action);
-        log_device_debug(device, "%s%s(SEQNUM=%"PRIu64", ACTION=%s)",
+        (void) sd_device_get_trigger_uuid(device, &event_id);
+        log_device_debug(device, "%s%s(SEQNUM=%"PRIu64", ACTION=%s%s%s)",
                          strempty(str), isempty(str) ? "" : " ",
-                         seqnum, strna(device_action_to_string(action)));
+                         seqnum, strna(device_action_to_string(action)),
+                         sd_id128_is_null(event_id) ? "" : ", UUID=",
+                         sd_id128_is_null(event_id) ? "" : id128_to_uuid_string(event_id, (char[ID128_UUID_STRING_MAX]){}));
 }
 
 int udev_rule_parse_value(char *str, char **ret_value, char **ret_endpos) {
@@ -578,4 +583,143 @@ int udev_queue_init(void) {
                 return -errno;
 
         return TAKE_FD(fd);
+}
+
+static int device_is_power_sink(sd_device *device) {
+        _cleanup_(sd_device_enumerator_unrefp) sd_device_enumerator *e = NULL;
+        bool found_source = false, found_sink = false;
+        sd_device *parent, *d;
+        int r;
+
+        assert(device);
+
+        /* USB-C power supply device has two power roles: source or sink. See,
+         * https://www.kernel.org/doc/Documentation/ABI/testing/sysfs-class-typec */
+
+        r = sd_device_enumerator_new(&e);
+        if (r < 0)
+                return r;
+
+        r = sd_device_enumerator_allow_uninitialized(e);
+        if (r < 0)
+                return r;
+
+        r = sd_device_enumerator_add_match_subsystem(e, "typec", true);
+        if (r < 0)
+                return r;
+
+        r = sd_device_get_parent(device, &parent);
+        if (r < 0)
+                return r;
+
+        r = sd_device_enumerator_add_match_parent(e, parent);
+        if (r < 0)
+                return r;
+
+        FOREACH_DEVICE(e, d) {
+                const char *val;
+
+                r = sd_device_get_sysattr_value(d, "power_role", &val);
+                if (r < 0) {
+                        if (r != -ENOENT)
+                                log_device_debug_errno(d, r, "Failed to read 'power_role' sysfs attribute, ignoring: %m");
+                        continue;
+                }
+
+                if (strstr(val, "[source]")) {
+                        found_source = true;
+                        log_device_debug(d, "The USB type-C port is in power source mode.");
+                } else if (strstr(val, "[sink]")) {
+                        found_sink = true;
+                        log_device_debug(d, "The USB type-C port is in power sink mode.");
+                }
+        }
+
+        if (found_sink)
+                log_device_debug(device, "The USB type-C device has at least one port in power sink mode.");
+        else if (!found_source)
+                log_device_debug(device, "The USB type-C device has no port in power source mode, assuming the device is in power sink mode.");
+        else
+                log_device_debug(device, "All USB type-C ports are in power source mode.");
+
+        return found_sink || !found_source;
+}
+
+int on_ac_power(void) {
+        _cleanup_(sd_device_enumerator_unrefp) sd_device_enumerator *e = NULL;
+        bool found_offline = false, found_online = false;
+        sd_device *d;
+        int r;
+
+        r = sd_device_enumerator_new(&e);
+        if (r < 0)
+                return r;
+
+        r = sd_device_enumerator_allow_uninitialized(e);
+        if (r < 0)
+                return r;
+
+        r = sd_device_enumerator_add_match_subsystem(e, "power_supply", true);
+        if (r < 0)
+                return r;
+
+        FOREACH_DEVICE(e, d) {
+                const char *val;
+                unsigned v;
+
+                r = sd_device_get_sysattr_value(d, "type", &val);
+                if (r < 0) {
+                        log_device_debug_errno(d, r, "Failed to read 'type' sysfs attribute, ignoring: %m");
+                        continue;
+                }
+
+                /* We assume every power source is AC, except for batteries. See
+                 * https://github.com/torvalds/linux/blob/4eef766b7d4d88f0b984781bc1bcb574a6eafdc7/include/linux/power_supply.h#L176
+                 * for defined power source types. Also see:
+                 * https://www.kernel.org/doc/Documentation/ABI/testing/sysfs-class-power */
+                if (streq(val, "Battery")) {
+                        log_device_debug(d, "The power supply is battery, ignoring.");
+                        continue;
+                }
+
+                /* Ignore USB-C power supply in source mode. See issue #21988. */
+                if (streq(val, "USB")) {
+                        r = device_is_power_sink(d);
+                        if (r <= 0) {
+                                if (r < 0)
+                                        log_device_debug_errno(d, r, "Failed to determine the current power role, ignoring: %m");
+                                else
+                                        log_device_debug(d, "USB power supply is in source mode, ignoring.");
+                                continue;
+                        }
+                }
+
+                r = sd_device_get_sysattr_value(d, "online", &val);
+                if (r < 0) {
+                        log_device_debug_errno(d, r, "Failed to read 'online' sysfs attribute, ignoring: %m");
+                        continue;
+                }
+
+                r = safe_atou(val, &v);
+                if (r < 0) {
+                        log_device_debug_errno(d, r, "Failed to parse 'online' attribute, ignoring: %m");
+                        continue;
+                }
+
+                if (v > 0) /* At least 1 and 2 are defined as different types of 'online' */
+                        found_online = true;
+                else
+                        found_offline = true;
+
+                log_device_debug(d, "The power supply is currently %s.", v > 0 ? "online" : "offline");
+        }
+
+        if (found_online)
+                log_debug("Found at least one online non-battery power supply, system is running on AC power.");
+        else if (!found_offline)
+                log_debug("Found no offline non-battery power supply, assuming system is running on AC power.");
+        else
+                log_debug("All non-battery power supplies are offline, assuming system is running with battery.");
+
+        return found_online || !found_offline;
 }

@@ -24,6 +24,7 @@
 #include "fileio.h"
 #include "hexdecoct.h"
 #include "io-util.h"
+#include "ioprio-util.h"
 #include "journal-file.h"
 #include "missing_ioprio.h"
 #include "mountpoint-util.h"
@@ -1203,6 +1204,7 @@ const sd_bus_vtable bus_exec_vtable[] = {
         SD_BUS_PROPERTY("RootHashSignature", "ay", property_get_root_hash_sig, 0, SD_BUS_VTABLE_PROPERTY_CONST),
         SD_BUS_PROPERTY("RootHashSignaturePath", "s", NULL, offsetof(ExecContext, root_hash_sig_path), SD_BUS_VTABLE_PROPERTY_CONST),
         SD_BUS_PROPERTY("RootVerity", "s", NULL, offsetof(ExecContext, root_verity), SD_BUS_VTABLE_PROPERTY_CONST),
+        SD_BUS_PROPERTY("ExtensionDirectories", "as", NULL, offsetof(ExecContext, extension_directories), SD_BUS_VTABLE_PROPERTY_CONST),
         SD_BUS_PROPERTY("ExtensionImages", "a(sba(ss))", property_get_extension_images, 0, SD_BUS_VTABLE_PROPERTY_CONST),
         SD_BUS_PROPERTY("MountImages", "a(ssba(ss))", property_get_mount_images, 0, SD_BUS_VTABLE_PROPERTY_CONST),
         SD_BUS_PROPERTY("OOMScoreAdjust", "i", property_get_oom_score_adjust, 0, SD_BUS_VTABLE_PROPERTY_CONST),
@@ -2810,7 +2812,7 @@ int bus_exec_context_set_transient_property(
                         if (r < 0)
                                 return r;
 
-                        c->ioprio = ioprio_prio_value(q, ioprio_prio_data(c->ioprio));
+                        c->ioprio = ioprio_normalize(ioprio_prio_value(q, ioprio_prio_data(c->ioprio)));
                         c->ioprio_set = true;
 
                         unit_write_settingf(u, flags, name, "IOSchedulingClass=%s", s);
@@ -2829,7 +2831,7 @@ int bus_exec_context_set_transient_property(
                         return sd_bus_error_setf(error, SD_BUS_ERROR_INVALID_ARGS, "Invalid IO scheduling priority: %i", p);
 
                 if (!UNIT_WRITE_FLAGS_NOOP(flags)) {
-                        c->ioprio = ioprio_prio_value(ioprio_prio_class(c->ioprio), p);
+                        c->ioprio = ioprio_normalize(ioprio_prio_value(ioprio_prio_class(c->ioprio), p));
                         c->ioprio_set = true;
 
                         unit_write_settingf(u, flags, name, "IOSchedulingPriority=%i", p);
@@ -3260,7 +3262,8 @@ int bus_exec_context_set_transient_property(
                 return 1;
 
         } else if (STR_IN_SET(name, "ReadWriteDirectories", "ReadOnlyDirectories", "InaccessibleDirectories",
-                              "ReadWritePaths", "ReadOnlyPaths", "InaccessiblePaths", "ExecPaths", "NoExecPaths")) {
+                              "ReadWritePaths", "ReadOnlyPaths", "InaccessiblePaths", "ExecPaths", "NoExecPaths",
+                              "ExtensionDirectories")) {
                 _cleanup_strv_free_ char **l = NULL;
                 char ***dirs;
                 char **p;
@@ -3290,6 +3293,8 @@ int bus_exec_context_set_transient_property(
                                 dirs = &c->exec_paths;
                         else if (streq(name, "NoExecPaths"))
                                 dirs = &c->no_exec_paths;
+                        else if (streq(name, "ExtensionDirectories"))
+                                dirs = &c->extension_directories;
                         else /* "InaccessiblePaths" */
                                 dirs = &c->inaccessible_paths;
 

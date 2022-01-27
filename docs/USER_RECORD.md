@@ -333,7 +333,7 @@ values, which is then inherited by all the user's processes, see
 [`setrlimit()`](http://man7.org/linux/man-pages/man2/setrlimit.2.html) for more
 information.
 
-`locked` → A boolean value. If true the user account is locked, the user may
+`locked` → A boolean value. If true, the user account is locked, the user may
 not log in. If this field is missing it should be assumed to be false,
 i.e. logins are permitted. This field corresponds to the `sp_expire` field of
 `struct spwd` (i.e. the `/etc/shadow` data for a user) being set to zero or
@@ -359,11 +359,11 @@ directory, also containing the `~/.identity` user record; `luks` is a per-user
 LUKS volume that is mounted as home directory, and `cifs` a home directory
 mounted from a Windows File Share. The five latter types are primarily used by
 `systemd-homed` when managing home directories, but may be used if other
-managers are used too. If this is not set `classic` is the implied default.
+managers are used too. If this is not set, `classic` is the implied default.
 
 `diskSize` → An unsigned 64bit integer, indicating the intended home directory
 disk space in bytes to assign to the user. Depending on the selected storage
-type this might be implement differently: for `luks` this is the intended size
+type this might be implemented differently: for `luks` this is the intended size
 of the file system and LUKS volume, while for the others this likely translates
 to classic file system quota settings.
 
@@ -425,7 +425,7 @@ the top-level directory of the CIFS share is used.
 
 `imagePath` → A string with an absolute file system path to the file, directory
 or block device to use for storage backing the home directory. If the `luks`
-storage is used this refers to the loopback file or block device node to store
+storage is used, this refers to the loopback file or block device node to store
 the LUKS volume on. For `fscrypt`, `directory`, `subvolume` this refers to the
 directory to bind mount as home directory on login. Not defined for `classic`
 or `cifs`.
@@ -465,7 +465,7 @@ relevant when the storage mechanism used is `luks`.
 referencing the file system UUID the home directory is located in. This is
 primarily relevant when the storage mechanism used is `luks`.
 
-`luksDiscard` → A boolean. If true and `luks` storage is used controls whether
+`luksDiscard` → A boolean. If true and `luks` storage is used, controls whether
 the loopback block devices, LUKS and the file system on top shall be used in
 `discard` mode, i.e. erased sectors should always be returned to the underlying
 storage. If false and `luks` storage is used turns this behavior off. In
@@ -500,6 +500,18 @@ memory cost for the PBKDF operation, when LUKS storage is used, in bytes.
 
 `luksPbkdfParallelThreads` → An unsigned 64bit integer, indicating the intended
 required parallel threads for the PBKDF operation, when LUKS storage is used.
+
+`autoResizeMode` → A string, one of `off`, `grow`, `shrink-and-grow`. Unless
+set to `off`, controls whether the home area shall be grown automatically to
+the size configured in `diskSize` automatically at login time. If set to
+`shrink-and-grown` the home area is also shrunk to the minimal size possible
+(as dictated by used disk space and file system constraints) on logout.
+
+`rebalanceWeight` → An unsigned integer, `null` or a boolean. Configures the
+free disk space rebalancing weight for the home area. The integer must be in
+the range 1…10000 to configure an explicit weight. If unset, or set to `null`
+or `true` the default weight of 100 is implied. If set to 0 or `false`
+rebalancing is turned off for this home area.
 
 `service` → A string declaring the service that defines or manages this user
 record. It is recommended to use reverse domain name notation for this. For
@@ -567,7 +579,7 @@ against all plugged in security tokens and if there's exactly one matching
 private key found with it it is used.
 
 `fido2HmacCredential` → An array of strings, each with a Base64-encoded FIDO2
-credential ID that shell be used for authentication with FIDO2 devices that
+credential ID that shall be used for authentication with FIDO2 devices that
 implement the `hmac-secret` extension. The salt to pass to the FIDO2 device is
 found in `fido2HmacSalt`.
 
@@ -723,9 +735,10 @@ that may be used in this section are identical to the equally named ones in the
 `fileSystemUuid`, `luksDiscard`, `luksOfflineDiscard`, `luksCipher`,
 `luksCipherMode`, `luksVolumeKeySize`, `luksPbkdfHashAlgorithm`,
 `luksPbkdfType`, `luksPbkdfTimeCostUSec`, `luksPbkdfMemoryCost`,
-`luksPbkdfParallelThreads`, `rateLimitIntervalUSec`, `rateLimitBurst`,
-`enforcePasswordPolicy`, `autoLogin`, `stopDelayUSec`, `killProcesses`,
-`passwordChangeMinUSec`, `passwordChangeMaxUSec`, `passwordChangeWarnUSec`,
+`luksPbkdfParallelThreads`, `autoResizeMode`, `rebalanceWeight`,
+`rateLimitIntervalUSec`, `rateLimitBurst`, `enforcePasswordPolicy`,
+`autoLogin`, `stopDelayUSec`, `killProcesses`, `passwordChangeMinUSec`,
+`passwordChangeMaxUSec`, `passwordChangeWarnUSec`,
 `passwordChangeInactiveUSec`, `passwordChangeNow`, `pkcs11TokenUri`,
 `fido2HmacCredential`.
 
@@ -866,7 +879,8 @@ on removable media the delay is selected very low to minimize the chance the
 home directory remains in unclean state if the storage device is removed from
 the system by the user).
 
-`accessMode` → The access mode currently in effect for the home directory iself.
+`accessMode` → The access mode currently in effect for the home directory
+itself.
 
 `fileSystemType` → The file system type backing the home directory: a short
 string, such as "btrfs", "ext4", "xfs".

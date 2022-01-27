@@ -13,6 +13,7 @@
 #include "discover-image.h"
 #include "dissect-image.h"
 #include "env-file.h"
+#include "env-util.h"
 #include "errno-list.h"
 #include "escape.h"
 #include "extension-release.h"
@@ -38,8 +39,6 @@
 #include "strv.h"
 #include "tmpfile-util.h"
 #include "user-util.h"
-
-static const char profile_dirs[] = CONF_PATHS_NULSTR("systemd/portable/profile");
 
 /* Markers used in the first line of our 20-portable.conf unit file drop-in to determine, that a) the unit file was
  * dropped there by the portable service logic and b) for which image it was dropped there. */
@@ -245,7 +244,6 @@ static int extract_now(
         STRV_FOREACH(i, paths.search_path) {
                 _cleanup_free_ char *resolved = NULL;
                 _cleanup_closedir_ DIR *d = NULL;
-                struct dirent *de;
 
                 r = chase_symlinks_and_opendir(*i, where, 0, &resolved, &d);
                 if (r < 0) {
@@ -255,6 +253,7 @@ static int extract_now(
 
                 FOREACH_DIRENT(de, d, return log_debug_errno(errno, "Failed to read directory: %m")) {
                         _cleanup_(portable_metadata_unrefp) PortableMetadata *m = NULL;
+                        _cleanup_(mac_selinux_freep) char *con = NULL;
                         _cleanup_close_ int fd = -1;
 
                         if (!unit_name_is_valid(de->d_name, UNIT_NAME_ANY))
@@ -276,16 +275,16 @@ static int extract_now(
                                 continue;
                         }
 
-                        if (socket_fd >= 0) {
-                                _cleanup_(mac_selinux_freep) char *con = NULL;
 #if HAVE_SELINUX
-                                /* The units will be copied on the host's filesystem, so if they had a SELinux label
-                                 * we have to preserve it. Copy it out so that it can be applied later. */
+                        /* The units will be copied on the host's filesystem, so if they had a SELinux label
+                         * we have to preserve it. Copy it out so that it can be applied later. */
 
-                                r = fgetfilecon_raw(fd, &con);
-                                if (r < 0 && errno != ENODATA)
-                                        log_debug_errno(errno, "Failed to get SELinux file context from '%s', ignoring: %m", de->d_name);
+                        r = fgetfilecon_raw(fd, &con);
+                        if (r < 0 && errno != ENODATA)
+                                log_debug_errno(errno, "Failed to get SELinux file context from '%s', ignoring: %m", de->d_name);
 #endif
+
+                        if (socket_fd >= 0) {
                                 struct iovec iov[] = {
                                         IOVEC_MAKE_STRING(de->d_name),
                                         IOVEC_MAKE((char *)"\0", sizeof(char)),
@@ -297,7 +296,7 @@ static int extract_now(
                                         return log_debug_errno(r, "Failed to send unit metadata to parent: %m");
                         }
 
-                        m = portable_metadata_new(de->d_name, NULL, NULL, fd);
+                        m = portable_metadata_new(de->d_name, where, con, fd);
                         if (!m)
                                 return -ENOMEM;
                         fd = -1;
@@ -338,10 +337,16 @@ static int portable_extract_by_path(
 
         r = loop_device_make_by_path(path, O_RDONLY, LO_FLAGS_PARTSCAN, &d);
         if (r == -EISDIR) {
+                _cleanup_free_ char *image_name = NULL;
+
                 /* We can't turn this into a loop-back block device, and this returns EISDIR? Then this is a directory
                  * tree and not a raw device. It's easy then. */
 
-                r = extract_now(path, matches, NULL, path_is_extension, -1, &os_release, &unit_files);
+                r = path_extract_filename(path, &image_name);
+                if (r < 0)
+                        return log_error_errno(r, "Failed to extract image name from path '%s': %m", path);
+
+                r = extract_now(path, matches, image_name, path_is_extension, -1, &os_release, &unit_files);
                 if (r < 0)
                         return r;
 
@@ -507,22 +512,23 @@ static int extract_image_and_extensions(
                 bool validate_sysext,
                 Image **ret_image,
                 OrderedHashmap **ret_extension_images,
+                OrderedHashmap **ret_extension_releases,
                 PortableMetadata **ret_os_release,
                 Hashmap **ret_unit_files,
+                char ***ret_valid_prefixes,
                 sd_bus_error *error) {
 
         _cleanup_free_ char *id = NULL, *version_id = NULL, *sysext_level = NULL;
         _cleanup_(portable_metadata_unrefp) PortableMetadata *os_release = NULL;
-        _cleanup_ordered_hashmap_free_ OrderedHashmap *extension_images = NULL;
+        _cleanup_ordered_hashmap_free_ OrderedHashmap *extension_images = NULL, *extension_releases = NULL;
         _cleanup_hashmap_free_ Hashmap *unit_files = NULL;
+        _cleanup_strv_free_ char **valid_prefixes = NULL;
         _cleanup_(image_unrefp) Image *image = NULL;
         Image *ext;
         int r;
 
         assert(name_or_path);
         assert(matches);
-        assert(ret_image);
-        assert(ret_extension_images);
 
         r = image_find_harder(IMAGE_PORTABLE, name_or_path, NULL, &image);
         if (r < 0)
@@ -534,6 +540,12 @@ static int extract_image_and_extensions(
                 extension_images = ordered_hashmap_new(&image_hash_ops);
                 if (!extension_images)
                         return -ENOMEM;
+
+                if (ret_extension_releases) {
+                        extension_releases = ordered_hashmap_new(&portable_metadata_hash_ops);
+                        if (!extension_releases)
+                                return -ENOMEM;
+                }
 
                 STRV_FOREACH(p, extension_image_paths) {
                         _cleanup_(image_unrefp) Image *new = NULL;
@@ -553,10 +565,12 @@ static int extract_image_and_extensions(
         if (r < 0)
                 return r;
 
-        /* If we are layering extension images on top of a runtime image, check that the os-release and extension-release metadata
-         * match, otherwise reject it immediately as invalid, or it will fail when the units are started. */
-        if (validate_sysext) {
+        /* If we are layering extension images on top of a runtime image, check that the os-release and
+         * extension-release metadata match, otherwise reject it immediately as invalid, or it will fail when
+         * the units are started. Also, collect valid portable prefixes if caller requested that. */
+        if (validate_sysext || ret_valid_prefixes) {
                 _cleanup_fclose_ FILE *f = NULL;
+                _cleanup_free_ char *prefixes = NULL;
 
                 r = take_fdopen_unlocked(&os_release->fd, "r", &f);
                 if (r < 0)
@@ -565,16 +579,25 @@ static int extract_image_and_extensions(
                 r = parse_env_file(f, os_release->name,
                                    "ID", &id,
                                    "VERSION_ID", &version_id,
-                                   "SYSEXT_LEVEL", &sysext_level);
+                                   "SYSEXT_LEVEL", &sysext_level,
+                                   "PORTABLE_PREFIXES", &prefixes);
                 if (r < 0)
                         return r;
+
+                if (prefixes) {
+                        valid_prefixes = strv_split(prefixes, WHITESPACE);
+                        if (!valid_prefixes)
+                                return -ENOMEM;
+                }
         }
 
         ORDERED_HASHMAP_FOREACH(ext, extension_images) {
                 _cleanup_(portable_metadata_unrefp) PortableMetadata *extension_release_meta = NULL;
                 _cleanup_hashmap_free_ Hashmap *extra_unit_files = NULL;
                 _cleanup_strv_free_ char **extension_release = NULL;
+                _cleanup_close_ int extension_release_fd = -1;
                 _cleanup_fclose_ FILE *f = NULL;
+                const char *e;
 
                 r = portable_extract_by_path(ext->path, /* path_is_extension= */ true, matches, &extension_release_meta, &extra_unit_files, error);
                 if (r < 0)
@@ -584,10 +607,15 @@ static int extract_image_and_extensions(
                 if (r < 0)
                         return r;
 
-                if (!validate_sysext)
+                if (!validate_sysext && !ret_valid_prefixes && !ret_extension_releases)
                         continue;
 
-                r = take_fdopen_unlocked(&extension_release_meta->fd, "r", &f);
+                /* We need to keep the fd valid, to return the PortableMetadata to the caller. */
+                extension_release_fd = fd_reopen(extension_release_meta->fd, O_CLOEXEC);
+                if (extension_release_fd < 0)
+                        return extension_release_fd;
+
+                r = take_fdopen_unlocked(&extension_release_fd, "r", &f);
                 if (r < 0)
                         return r;
 
@@ -595,19 +623,49 @@ static int extract_image_and_extensions(
                 if (r < 0)
                         return r;
 
-                r = extension_release_validate(ext->path, id, version_id, sysext_level, extension_release);
-                if (r == 0)
-                        return sd_bus_error_set_errnof(error, SYNTHETIC_ERRNO(ESTALE), "Image %s extension-release metadata does not match the root's", ext->path);
-                if (r < 0)
-                        return sd_bus_error_set_errnof(error, r, "Failed to compare image %s extension-release metadata with the root's os-release: %m", ext->path);
+                if (validate_sysext) {
+                        r = extension_release_validate(ext->path, id, version_id, sysext_level, "portable", extension_release);
+                        if (r == 0)
+                                return sd_bus_error_set_errnof(error, SYNTHETIC_ERRNO(ESTALE), "Image %s extension-release metadata does not match the root's", ext->path);
+                        if (r < 0)
+                                return sd_bus_error_set_errnof(error, r, "Failed to compare image %s extension-release metadata with the root's os-release: %m", ext->path);
+                }
+
+                e = strv_env_pairs_get(extension_release, "PORTABLE_PREFIXES");
+                if (e) {
+                        _cleanup_strv_free_ char **l = NULL;
+
+                        l = strv_split(e, WHITESPACE);
+                        if (!l)
+                                return -ENOMEM;
+
+                        r = strv_extend_strv(&valid_prefixes, l, true);
+                        if (r < 0)
+                                return r;
+                }
+
+                if (ret_extension_releases) {
+                        r = ordered_hashmap_put(extension_releases, ext->name, extension_release_meta);
+                        if (r < 0)
+                                return r;
+                        TAKE_PTR(extension_release_meta);
+                }
         }
 
-        *ret_image = TAKE_PTR(image);
-        *ret_extension_images = TAKE_PTR(extension_images);
+        strv_sort(valid_prefixes);
+
+        if (ret_image)
+                *ret_image = TAKE_PTR(image);
+        if (ret_extension_images)
+                *ret_extension_images = TAKE_PTR(extension_images);
+        if (ret_extension_releases)
+                *ret_extension_releases = TAKE_PTR(extension_releases);
         if (ret_os_release)
                 *ret_os_release = TAKE_PTR(os_release);
         if (ret_unit_files)
                 *ret_unit_files = TAKE_PTR(unit_files);
+        if (ret_valid_prefixes)
+                *ret_valid_prefixes = TAKE_PTR(valid_prefixes);
 
         return 0;
 }
@@ -617,24 +675,32 @@ int portable_extract(
                 char **matches,
                 char **extension_image_paths,
                 PortableMetadata **ret_os_release,
+                OrderedHashmap **ret_extension_releases,
                 Hashmap **ret_unit_files,
+                char ***ret_valid_prefixes,
                 sd_bus_error *error) {
 
         _cleanup_(portable_metadata_unrefp) PortableMetadata *os_release = NULL;
-        _cleanup_ordered_hashmap_free_ OrderedHashmap *extension_images = NULL;
+        _cleanup_ordered_hashmap_free_ OrderedHashmap *extension_images = NULL, *extension_releases = NULL;
         _cleanup_hashmap_free_ Hashmap *unit_files = NULL;
+        _cleanup_(strv_freep) char **valid_prefixes = NULL;
         _cleanup_(image_unrefp) Image *image = NULL;
         int r;
 
-        r = extract_image_and_extensions(name_or_path,
-                                         matches,
-                                         extension_image_paths,
-                                         /* validate_sysext= */ false,
-                                         &image,
-                                         &extension_images,
-                                         &os_release,
-                                         &unit_files,
-                                         error);
+        assert(name_or_path);
+
+        r = extract_image_and_extensions(
+                        name_or_path,
+                        matches,
+                        extension_image_paths,
+                        /* validate_sysext= */ false,
+                        &image,
+                        &extension_images,
+                        &extension_releases,
+                        &os_release,
+                        &unit_files,
+                        ret_valid_prefixes ? &valid_prefixes : NULL,
+                        error);
         if (r < 0)
                 return r;
 
@@ -651,8 +717,14 @@ int portable_extract(
                                          isempty(extensions) ? "" : extensions);
         }
 
-        *ret_os_release = TAKE_PTR(os_release);
-        *ret_unit_files = TAKE_PTR(unit_files);
+        if (ret_os_release)
+                *ret_os_release = TAKE_PTR(os_release);
+        if (ret_extension_releases)
+                *ret_extension_releases = TAKE_PTR(extension_releases);
+        if (ret_unit_files)
+                *ret_unit_files = TAKE_PTR(unit_files);
+        if (ret_valid_prefixes)
+                *ret_valid_prefixes = TAKE_PTR(valid_prefixes);
 
         return 0;
 }
@@ -833,6 +905,10 @@ static const char *root_setting_from_image(ImageType type) {
         return IN_SET(type, IMAGE_DIRECTORY, IMAGE_SUBVOLUME) ? "RootDirectory=" : "RootImage=";
 }
 
+static const char *extension_setting_from_image(ImageType type) {
+        return IN_SET(type, IMAGE_DIRECTORY, IMAGE_SUBVOLUME) ? "ExtensionDirectories=" : "ExtensionImages=";
+}
+
 static int make_marker_text(const char *image_path, OrderedHashmap *extension_images, char **ret_text) {
         _cleanup_free_ char *text = NULL, *escaped_image_path = NULL;
         Image *ext;
@@ -879,7 +955,6 @@ static int install_chroot_dropin(
                 size_t *n_changes) {
 
         _cleanup_free_ char *text = NULL, *dropin = NULL;
-        Image *ext;
         int r;
 
         assert(image_path);
@@ -897,6 +972,7 @@ static int install_chroot_dropin(
         if (endswith(m->name, ".service")) {
                 const char *os_release_source, *root_type;
                 _cleanup_free_ char *base_name = NULL;
+                Image *ext;
 
                 root_type = root_setting_from_image(type);
 
@@ -923,7 +999,7 @@ static int install_chroot_dropin(
 
                 if (m->image_path && !path_equal(m->image_path, image_path))
                         ORDERED_HASHMAP_FOREACH(ext, extension_images)
-                                if (!strextend(&text, "ExtensionImages=", ext->path, "\n"))
+                                if (!strextend(&text, extension_setting_from_image(ext->type), ext->path, "\n"))
                                         return -ENOMEM;
         }
 
@@ -937,33 +1013,6 @@ static int install_chroot_dropin(
                 *ret_dropin = TAKE_PTR(dropin);
 
         return 0;
-}
-
-static int find_profile(const char *name, const char *unit, char **ret) {
-        const char *p, *dot;
-
-        assert(name);
-        assert(ret);
-
-        assert_se(dot = strrchr(unit, '.'));
-
-        NULSTR_FOREACH(p, profile_dirs) {
-                _cleanup_free_ char *joined = NULL;
-
-                joined = strjoin(p, "/", name, "/", dot + 1, ".conf");
-                if (!joined)
-                        return -ENOMEM;
-
-                if (laccess(joined, F_OK) >= 0) {
-                        *ret = TAKE_PTR(joined);
-                        return 0;
-                }
-
-                if (errno != ENOENT)
-                        return -errno;
-        }
-
-        return -ENOENT;
 }
 
 static int install_profile_dropin(
@@ -986,7 +1035,7 @@ static int install_profile_dropin(
         if (!profile)
                 return 0;
 
-        r = find_profile(profile, m->name, &from);
+        r = find_portable_profile(profile, m->name, &from);
         if (r < 0) {
                 if (r != -ENOENT)
                         return log_debug_errno(errno, "Profile '%s' is not accessible: %m", profile);
@@ -1211,6 +1260,18 @@ static int install_image_and_extensions_symlinks(
         return 0;
 }
 
+static bool prefix_matches_compatible(char **matches, char **valid_prefixes) {
+        char **m;
+
+        /* Checks if all 'matches' are included in the list of 'valid_prefixes' */
+
+        STRV_FOREACH(m, matches)
+                if (!strv_contains(valid_prefixes, *m))
+                        return false;
+
+        return true;
+}
+
 int portable_attach(
                 sd_bus *bus,
                 const char *name_or_path,
@@ -1225,33 +1286,64 @@ int portable_attach(
         _cleanup_ordered_hashmap_free_ OrderedHashmap *extension_images = NULL;
         _cleanup_hashmap_free_ Hashmap *unit_files = NULL;
         _cleanup_(lookup_paths_free) LookupPaths paths = {};
+        _cleanup_strv_free_ char **valid_prefixes = NULL;
         _cleanup_(image_unrefp) Image *image = NULL;
         PortableMetadata *item;
         int r;
 
-        r = extract_image_and_extensions(name_or_path,
-                                         matches,
-                                         extension_image_paths,
-                                         /* validate_sysext= */ true,
-                                         &image,
-                                         &extension_images,
-                                         /* os_release= */ NULL,
-                                         &unit_files,
-                                         error);
+        r = extract_image_and_extensions(
+                        name_or_path,
+                        matches,
+                        extension_image_paths,
+                        /* validate_sysext= */ true,
+                        &image,
+                        &extension_images,
+                        /* extension_releases= */ NULL,
+                        /* os_release= */ NULL,
+                        &unit_files,
+                        &valid_prefixes,
+                        error);
         if (r < 0)
                 return r;
 
-        if (hashmap_isempty(unit_files)) {
-                _cleanup_free_ char *extensions = strv_join(extension_image_paths, ", ");
-                if (!extensions)
+        if (valid_prefixes && !prefix_matches_compatible(matches, valid_prefixes)) {
+                _cleanup_free_ char *matches_joined = NULL, *extensions_joined = NULL, *valid_prefixes_joined = NULL;
+
+                matches_joined = strv_join(matches, "', '");
+                if (!matches_joined)
                         return -ENOMEM;
 
-                return sd_bus_error_setf(error,
-                                         SD_BUS_ERROR_INVALID_ARGS,
-                                         "Couldn't find any matching unit files in image '%s%s%s', refusing.",
-                                         image->path,
-                                         isempty(extensions) ? "" : "' or any of its extensions '",
-                                         isempty(extensions) ? "" : extensions);
+                extensions_joined = strv_join(extension_image_paths, ", ");
+                if (!extensions_joined)
+                        return -ENOMEM;
+
+                valid_prefixes_joined = strv_join(valid_prefixes, ", ");
+                if (!valid_prefixes_joined)
+                        return -ENOMEM;
+
+                return sd_bus_error_setf(
+                                error,
+                                SD_BUS_ERROR_INVALID_ARGS,
+                                "Selected matches '%s' are not compatible with portable service image '%s%s%s', refusing. (Acceptable prefix matches are: %s)",
+                                matches_joined,
+                                image->path,
+                                isempty(extensions_joined) ? "" : "' or any of its extensions '",
+                                strempty(extensions_joined),
+                                valid_prefixes_joined);
+        }
+
+        if (hashmap_isempty(unit_files)) {
+                _cleanup_free_ char *extensions_joined = strv_join(extension_image_paths, ", ");
+                if (!extensions_joined)
+                        return -ENOMEM;
+
+                return sd_bus_error_setf(
+                                error,
+                                SD_BUS_ERROR_INVALID_ARGS,
+                                "Couldn't find any matching unit files in image '%s%s%s', refusing.",
+                                image->path,
+                                isempty(extensions_joined) ? "" : "' or any of its extensions '",
+                                strempty(extensions_joined));
         }
 
         r = lookup_paths_init(&paths, UNIT_FILE_SYSTEM, LOOKUP_PATHS_SPLIT_USR, NULL);
@@ -1437,7 +1529,6 @@ int portable_detach(
         _cleanup_set_free_ Set *unit_files = NULL, *markers = NULL;
         _cleanup_closedir_ DIR *d = NULL;
         const char *where, *item;
-        struct dirent *de;
         int ret = 0;
         int r;
 
@@ -1598,6 +1689,7 @@ not_found:
 static int portable_get_state_internal(
                 sd_bus *bus,
                 const char *name_or_path,
+                char **extension_image_paths,
                 PortableFlags flags,
                 PortableState *ret,
                 sd_bus_error *error) {
@@ -1607,7 +1699,6 @@ static int portable_get_state_internal(
         _cleanup_set_free_ Set *unit_files = NULL;
         _cleanup_closedir_ DIR *d = NULL;
         const char *where;
-        struct dirent *de;
         int r;
 
         assert(name_or_path);
@@ -1643,7 +1734,7 @@ static int portable_get_state_internal(
                 if (!IN_SET(de->d_type, DT_LNK, DT_REG))
                         continue;
 
-                r = test_chroot_dropin(d, where, de->d_name, name_or_path, NULL, NULL);
+                r = test_chroot_dropin(d, where, de->d_name, name_or_path, extension_image_paths, NULL);
                 if (r < 0)
                         return r;
                 if (r == 0)
@@ -1676,6 +1767,7 @@ static int portable_get_state_internal(
 int portable_get_state(
                 sd_bus *bus,
                 const char *name_or_path,
+                char **extension_image_paths,
                 PortableFlags flags,
                 PortableState *ret,
                 sd_bus_error *error) {
@@ -1689,12 +1781,12 @@ int portable_get_state(
         /* We look for matching units twice: once in the regular directories, and once in the runtime directories — but
          * the latter only if we didn't find anything in the former. */
 
-        r = portable_get_state_internal(bus, name_or_path, flags & ~PORTABLE_RUNTIME, &state, error);
+        r = portable_get_state_internal(bus, name_or_path, extension_image_paths, flags & ~PORTABLE_RUNTIME, &state, error);
         if (r < 0)
                 return r;
 
         if (state == PORTABLE_DETACHED) {
-                r = portable_get_state_internal(bus, name_or_path, flags | PORTABLE_RUNTIME, &state, error);
+                r = portable_get_state_internal(bus, name_or_path, extension_image_paths, flags | PORTABLE_RUNTIME, &state, error);
                 if (r < 0)
                         return r;
         }
@@ -1706,7 +1798,7 @@ int portable_get_state(
 int portable_get_profiles(char ***ret) {
         assert(ret);
 
-        return conf_files_list_nulstr(ret, NULL, NULL, CONF_FILES_DIRECTORY|CONF_FILES_BASENAME|CONF_FILES_FILTER_MASKED, profile_dirs);
+        return conf_files_list_nulstr(ret, NULL, NULL, CONF_FILES_DIRECTORY|CONF_FILES_BASENAME|CONF_FILES_FILTER_MASKED, PORTABLE_PROFILE_DIRS);
 }
 
 static const char* const portable_change_type_table[_PORTABLE_CHANGE_TYPE_MAX] = {

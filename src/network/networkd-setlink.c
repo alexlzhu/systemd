@@ -6,6 +6,7 @@
 #include <linux/if_bridge.h>
 
 #include "missing_network.h"
+#include "netif-util.h"
 #include "netlink-util.h"
 #include "networkd-address.h"
 #include "networkd-can.h"
@@ -23,6 +24,7 @@ static const char *const set_link_operation_table[_SET_LINK_OPERATION_MAX] = {
         [SET_LINK_CAN]                     = "CAN interface configurations",
         [SET_LINK_FLAGS]                   = "link flags",
         [SET_LINK_GROUP]                   = "interface group",
+        [SET_LINK_IPOIB]                   = "IPoIB configurations",
         [SET_LINK_MAC]                     = "MAC address",
         [SET_LINK_MASTER]                  = "master interface",
         [SET_LINK_MTU]                     = "MTU",
@@ -152,6 +154,10 @@ static int link_set_group_handler(sd_netlink *rtnl, sd_netlink_message *m, Link 
         return set_link_handler_internal(rtnl, m, link, SET_LINK_GROUP, /* ignore = */ false, NULL);
 }
 
+static int link_set_ipoib_handler(sd_netlink *rtnl, sd_netlink_message *m, Link *link) {
+        return set_link_handler_internal(rtnl, m, link, SET_LINK_IPOIB, /* ignore = */ true, NULL);
+}
+
 static int link_set_mac_handler(sd_netlink *rtnl, sd_netlink_message *m, Link *link) {
         return set_link_handler_internal(rtnl, m, link, SET_LINK_MAC, /* ignore = */ true, get_link_default_handler);
 }
@@ -183,7 +189,7 @@ static int link_set_mac_allow_retry_handler(sd_netlink *rtnl, sd_netlink_message
                 return 0;
         }
 
-        /* set_link_mac_handler() also decrement set_link_messages, so once increment the value. */
+        /* set_link_mac_handler() also decrements set_link_messages, so increment the value once. */
         link->set_link_messages++;
         return link_set_mac_handler(rtnl, m, link);
 }
@@ -213,214 +219,189 @@ static int link_set_mtu_handler(sd_netlink *rtnl, sd_netlink_message *m, Link *l
         return 0;
 }
 
-static int link_configure(
+static int link_configure_fill_message(
                 Link *link,
+                sd_netlink_message *req,
                 SetLinkOperation op,
-                void *userdata,
-                link_netlink_message_handler_t callback) {
-
-        _cleanup_(sd_netlink_message_unrefp) sd_netlink_message *req = NULL;
+                void *userdata) {
         int r;
-
-        assert(link);
-        assert(link->manager);
-        assert(link->manager->rtnl);
-        assert(link->network);
-        assert(op >= 0 && op < _SET_LINK_OPERATION_MAX);
-        assert(callback);
-
-        log_link_debug(link, "Setting %s", set_link_operation_to_string(op));
-
-        if (op == SET_LINK_BOND) {
-                r = sd_rtnl_message_new_link(link->manager->rtnl, &req, RTM_NEWLINK, link->master_ifindex);
-                if (r < 0)
-                        return log_link_debug_errno(link, r, "Could not allocate RTM_NEWLINK message: %m");
-        } else if (op == SET_LINK_CAN) {
-                r = sd_rtnl_message_new_link(link->manager->rtnl, &req, RTM_NEWLINK, link->ifindex);
-                if (r < 0)
-                        return log_link_debug_errno(link, r, "Could not allocate RTM_NEWLINK message: %m");
-        } else {
-                r = sd_rtnl_message_new_link(link->manager->rtnl, &req, RTM_SETLINK, link->ifindex);
-                if (r < 0)
-                        return log_link_debug_errno(link, r, "Could not allocate RTM_SETLINK message: %m");
-        }
 
         switch (op) {
         case SET_LINK_ADDRESS_GENERATION_MODE:
                 r = sd_netlink_message_open_container(req, IFLA_AF_SPEC);
                 if (r < 0)
-                        return log_link_debug_errno(link, r, "Could not open IFLA_AF_SPEC container: %m");
+                        return r;
 
                 r = sd_netlink_message_open_container(req, AF_INET6);
                 if (r < 0)
-                        return log_link_debug_errno(link, r, "Could not open AF_INET6 container: %m");
+                        return r;
 
                 r = sd_netlink_message_append_u8(req, IFLA_INET6_ADDR_GEN_MODE, PTR_TO_UINT8(userdata));
                 if (r < 0)
-                        return log_link_debug_errno(link, r, "Could not append IFLA_INET6_ADDR_GEN_MODE attribute: %m");
+                        return r;
 
                 r = sd_netlink_message_close_container(req);
                 if (r < 0)
-                        return log_link_debug_errno(link, r, "Could not close AF_INET6 container: %m");
+                        return r;
 
                 r = sd_netlink_message_close_container(req);
                 if (r < 0)
-                        return log_link_debug_errno(link, r, "Could not close IFLA_AF_SPEC container: %m");
+                        return r;
                 break;
         case SET_LINK_BOND:
                 r = sd_netlink_message_set_flags(req, NLM_F_REQUEST | NLM_F_ACK);
                 if (r < 0)
-                        return log_link_debug_errno(link, r, "Could not set netlink message flags: %m");
+                        return r;
 
                 r = sd_netlink_message_open_container(req, IFLA_LINKINFO);
                 if (r < 0)
-                        return log_link_debug_errno(link, r, "Could not open IFLA_LINKINFO container: %m");
+                        return r;
 
                 r = sd_netlink_message_open_container_union(req, IFLA_INFO_DATA, "bond");
                 if (r < 0)
-                        return log_link_debug_errno(link, r, "Could not open IFLA_INFO_DATA container: %m");
+                        return r;
 
                 if (link->network->active_slave) {
                         r = sd_netlink_message_append_u32(req, IFLA_BOND_ACTIVE_SLAVE, link->ifindex);
                         if (r < 0)
-                                return log_link_debug_errno(link, r, "Could not append IFLA_BOND_ACTIVE_SLAVE attribute: %m");
+                                return r;
                 }
 
                 if (link->network->primary_slave) {
                         r = sd_netlink_message_append_u32(req, IFLA_BOND_PRIMARY, link->ifindex);
                         if (r < 0)
-                                return log_link_debug_errno(link, r, "Could not append IFLA_BOND_PRIMARY attribute: %m");
+                                return r;
                 }
 
                 r = sd_netlink_message_close_container(req);
                 if (r < 0)
-                        return log_link_debug_errno(link, r, "Could not close IFLA_INFO_DATA container: %m");
+                        return r;
 
                 r = sd_netlink_message_close_container(req);
                 if (r < 0)
-                        return log_link_debug_errno(link, r, "Could not close IFLA_LINKINFO container: %m");
+                        return r;
 
                 break;
         case SET_LINK_BRIDGE:
                 r = sd_rtnl_message_link_set_family(req, AF_BRIDGE);
                 if (r < 0)
-                        return log_link_debug_errno(link, r, "Could not set message family: %m");
+                        return r;
 
                 r = sd_netlink_message_open_container(req, IFLA_PROTINFO);
                 if (r < 0)
-                        return log_link_debug_errno(link, r, "Could not open IFLA_PROTINFO container: %m");
+                        return r;
 
                 if (link->network->use_bpdu >= 0) {
                         r = sd_netlink_message_append_u8(req, IFLA_BRPORT_GUARD, link->network->use_bpdu);
                         if (r < 0)
-                                return log_link_debug_errno(link, r, "Could not append IFLA_BRPORT_GUARD attribute: %m");
+                                return r;
                 }
 
                 if (link->network->hairpin >= 0) {
                         r = sd_netlink_message_append_u8(req, IFLA_BRPORT_MODE, link->network->hairpin);
                         if (r < 0)
-                                return log_link_debug_errno(link, r, "Could not append IFLA_BRPORT_MODE attribute: %m");
+                                return r;
                 }
 
                 if (link->network->fast_leave >= 0) {
                         r = sd_netlink_message_append_u8(req, IFLA_BRPORT_FAST_LEAVE, link->network->fast_leave);
                         if (r < 0)
-                                return log_link_debug_errno(link, r, "Could not append IFLA_BRPORT_FAST_LEAVE attribute: %m");
+                                return r;
                 }
 
                 if (link->network->allow_port_to_be_root >= 0) {
                         r = sd_netlink_message_append_u8(req, IFLA_BRPORT_PROTECT, link->network->allow_port_to_be_root);
                         if (r < 0)
-                                return log_link_debug_errno(link, r, "Could not append IFLA_BRPORT_PROTECT attribute: %m");
+                                return r;
                 }
 
                 if (link->network->unicast_flood >= 0) {
                         r = sd_netlink_message_append_u8(req, IFLA_BRPORT_UNICAST_FLOOD, link->network->unicast_flood);
                         if (r < 0)
-                                return log_link_debug_errno(link, r, "Could not append IFLA_BRPORT_UNICAST_FLOOD attribute: %m");
+                                return r;
                 }
 
                 if (link->network->multicast_flood >= 0) {
                         r = sd_netlink_message_append_u8(req, IFLA_BRPORT_MCAST_FLOOD, link->network->multicast_flood);
                         if (r < 0)
-                                return log_link_debug_errno(link, r, "Could not append IFLA_BRPORT_MCAST_FLOOD attribute: %m");
+                                return r;
                 }
 
                 if (link->network->multicast_to_unicast >= 0) {
                         r = sd_netlink_message_append_u8(req, IFLA_BRPORT_MCAST_TO_UCAST, link->network->multicast_to_unicast);
                         if (r < 0)
-                                return log_link_debug_errno(link, r, "Could not append IFLA_BRPORT_MCAST_TO_UCAST attribute: %m");
+                                return r;
                 }
 
                 if (link->network->neighbor_suppression >= 0) {
                         r = sd_netlink_message_append_u8(req, IFLA_BRPORT_NEIGH_SUPPRESS, link->network->neighbor_suppression);
                         if (r < 0)
-                                return log_link_debug_errno(link, r, "Could not append IFLA_BRPORT_NEIGH_SUPPRESS attribute: %m");
+                                return r;
                 }
 
                 if (link->network->learning >= 0) {
                         r = sd_netlink_message_append_u8(req, IFLA_BRPORT_LEARNING, link->network->learning);
                         if (r < 0)
-                                return log_link_debug_errno(link, r, "Could not append IFLA_BRPORT_LEARNING attribute: %m");
+                                return r;
                 }
 
                 if (link->network->bridge_proxy_arp >= 0) {
                         r = sd_netlink_message_append_u8(req, IFLA_BRPORT_PROXYARP, link->network->bridge_proxy_arp);
                         if (r < 0)
-                                return log_link_debug_errno(link, r, "Could not append IFLA_BRPORT_PROXYARP attribute: %m");
+                                return r;
                 }
 
                 if (link->network->bridge_proxy_arp_wifi >= 0) {
                         r = sd_netlink_message_append_u8(req, IFLA_BRPORT_PROXYARP_WIFI, link->network->bridge_proxy_arp_wifi);
                         if (r < 0)
-                                return log_link_debug_errno(link, r, "Could not append IFLA_BRPORT_PROXYARP_WIFI attribute: %m");
+                                return r;
                 }
 
                 if (link->network->cost != 0) {
                         r = sd_netlink_message_append_u32(req, IFLA_BRPORT_COST, link->network->cost);
                         if (r < 0)
-                                return log_link_debug_errno(link, r, "Could not append IFLA_BRPORT_COST attribute: %m");
+                                return r;
                 }
 
                 if (link->network->priority != LINK_BRIDGE_PORT_PRIORITY_INVALID) {
                         r = sd_netlink_message_append_u16(req, IFLA_BRPORT_PRIORITY, link->network->priority);
                         if (r < 0)
-                                return log_link_debug_errno(link, r, "Could not append IFLA_BRPORT_PRIORITY attribute: %m");
+                                return r;
                 }
 
                 if (link->network->multicast_router != _MULTICAST_ROUTER_INVALID) {
                         r = sd_netlink_message_append_u8(req, IFLA_BRPORT_MULTICAST_ROUTER, link->network->multicast_router);
                         if (r < 0)
-                                return log_link_debug_errno(link, r, "Could not append IFLA_BRPORT_MULTICAST_ROUTER attribute: %m");
+                                return r;
                 }
 
                 r = sd_netlink_message_close_container(req);
                 if (r < 0)
-                        return log_link_debug_errno(link, r, "Could not close IFLA_PROTINFO container: %m");
+                        return r;
                 break;
         case SET_LINK_BRIDGE_VLAN:
                 r = sd_rtnl_message_link_set_family(req, AF_BRIDGE);
                 if (r < 0)
-                        return log_link_debug_errno(link, r, "Could not set message family: %m");
+                        return r;
 
                 r = sd_netlink_message_open_container(req, IFLA_AF_SPEC);
                 if (r < 0)
-                        return log_link_debug_errno(link, r, "Could not open IFLA_AF_SPEC container: %m");
+                        return r;
 
                 if (link->master_ifindex <= 0) {
                         /* master needs BRIDGE_FLAGS_SELF flag */
                         r = sd_netlink_message_append_u16(req, IFLA_BRIDGE_FLAGS, BRIDGE_FLAGS_SELF);
                         if (r < 0)
-                                return log_link_debug_errno(link, r, "Could not append IFLA_BRIDGE_FLAGS attribute: %m");
+                                return r;
                 }
 
                 r = bridge_vlan_append_info(link, req, link->network->pvid, link->network->br_vid_bitmap, link->network->br_untagged_bitmap);
                 if (r < 0)
-                        return log_link_debug_errno(link, r, "Could not append VLANs: %m");
+                        return r;
 
                 r = sd_netlink_message_close_container(req);
                 if (r < 0)
-                        return log_link_debug_errno(link, r, "Could not close IFLA_AF_SPEC container: %m");
+                        return r;
 
                 break;
         case SET_LINK_CAN:
@@ -453,38 +434,77 @@ static int link_configure(
 
                 r = sd_rtnl_message_link_set_flags(req, ifi_flags, ifi_change);
                 if (r < 0)
-                        return log_link_debug_errno(link, r, "Could not set link flags: %m");
+                        return r;
 
                 break;
         }
         case SET_LINK_GROUP:
                 r = sd_netlink_message_append_u32(req, IFLA_GROUP, (uint32_t) link->network->group);
                 if (r < 0)
-                        return log_link_debug_errno(link, r, "Could not append IFLA_GROUP attribute: %m");
+                        return r;
                 break;
         case SET_LINK_MAC:
-                r = sd_netlink_message_append_ether_addr(req, IFLA_ADDRESS, link->network->mac);
+                r = netlink_message_append_hw_addr(req, IFLA_ADDRESS, &link->requested_hw_addr);
                 if (r < 0)
-                        return log_link_debug_errno(link, r, "Could not append IFLA_ADDRESS attribute: %m");
+                        return r;
+                break;
+        case SET_LINK_IPOIB:
+                r = ipoib_set_netlink_message(link, req);
+                if (r < 0)
+                        return r;
                 break;
         case SET_LINK_MASTER:
                 r = sd_netlink_message_append_u32(req, IFLA_MASTER, PTR_TO_UINT32(userdata));
                 if (r < 0)
-                        return log_link_debug_errno(link, r, "Could not append IFLA_MASTER attribute: %m");
+                        return r;
                 break;
         case SET_LINK_MTU:
                 r = sd_netlink_message_append_u32(req, IFLA_MTU, PTR_TO_UINT32(userdata));
                 if (r < 0)
-                        return log_link_debug_errno(link, r, "Could not append IFLA_MTU attribute: %m");
+                        return r;
                 break;
         default:
                 assert_not_reached();
         }
 
+        return 0;
+}
+
+static int link_configure(
+                Link *link,
+                SetLinkOperation op,
+                void *userdata,
+                link_netlink_message_handler_t callback) {
+
+        _cleanup_(sd_netlink_message_unrefp) sd_netlink_message *req = NULL;
+        int r;
+
+        assert(link);
+        assert(link->manager);
+        assert(link->manager->rtnl);
+        assert(link->network);
+        assert(op >= 0 && op < _SET_LINK_OPERATION_MAX);
+        assert(callback);
+
+        log_link_debug(link, "Setting %s", set_link_operation_to_string(op));
+
+        if (op == SET_LINK_BOND)
+                r = sd_rtnl_message_new_link(link->manager->rtnl, &req, RTM_NEWLINK, link->master_ifindex);
+        else if (IN_SET(op, SET_LINK_CAN, SET_LINK_IPOIB))
+                r = sd_rtnl_message_new_link(link->manager->rtnl, &req, RTM_NEWLINK, link->ifindex);
+        else
+                r = sd_rtnl_message_new_link(link->manager->rtnl, &req, RTM_SETLINK, link->ifindex);
+        if (r < 0)
+                return log_link_debug_errno(link, r, "Could not allocate netlink message: %m");
+
+        r = link_configure_fill_message(link, req, op, userdata);
+        if (r < 0)
+                return log_link_debug_errno(link, r, "Could not create netlink message: %m");
+
         r = netlink_call_async(link->manager->rtnl, NULL, req, callback,
                                link_netlink_destroy_callback, link);
         if (r < 0)
-                return log_link_debug_errno(link, r, "Could not send RTM_SETLINK message: %m");
+                return log_link_debug_errno(link, r, "Could not send netlink message: %m");
 
         link_ref(link);
         return 0;
@@ -507,6 +527,9 @@ static bool link_is_ready_to_call_set_link(Request *req) {
         int r;
 
         assert(req);
+        assert(req->link);
+        assert(req->link->manager);
+        assert(req->link->network);
 
         link = req->link;
         op = PTR_TO_INT(req->set_link_operation_ptr);
@@ -542,9 +565,9 @@ static bool link_is_ready_to_call_set_link(Request *req) {
                 break;
         case SET_LINK_MAC:
                 if (req->netlink_handler == link_set_mac_handler) {
-                        /* This is the second trial to set MTU. On the first attempt
+                        /* This is the second attempt to set hardware address. On the first attempt
                          * req->netlink_handler points to link_set_mac_allow_retry_handler().
-                         * The first trial failed as the interface was up. */
+                         * The first attempt failed as the interface was up. */
                         r = link_down(link);
                         if (r < 0) {
                                 link_enter_failed(link);
@@ -554,14 +577,19 @@ static bool link_is_ready_to_call_set_link(Request *req) {
                 break;
         case SET_LINK_MASTER: {
                 uint32_t m = 0;
-
-                assert(link->network);
+                Request req_mac = {
+                        .link = link,
+                        .type = REQUEST_TYPE_SET_LINK,
+                        .set_link_operation_ptr = INT_TO_PTR(SET_LINK_MAC),
+                };
 
                 if (link->network->batadv) {
                         if (!netdev_is_ready(link->network->batadv))
                                 return false;
                         m = link->network->batadv->ifindex;
                 } else if (link->network->bond) {
+                        if (ordered_set_contains(link->manager->request_queue, &req_mac))
+                                return false;
                         if (!netdev_is_ready(link->network->bond))
                                 return false;
                         m = link->network->bond->ifindex;
@@ -577,6 +605,8 @@ static bool link_is_ready_to_call_set_link(Request *req) {
                                 }
                         }
                 } else if (link->network->bridge) {
+                        if (ordered_set_contains(link->manager->request_queue, &req_mac))
+                                return false;
                         if (!netdev_is_ready(link->network->bridge))
                                 return false;
                         m = link->network->bridge->ifindex;
@@ -588,6 +618,15 @@ static bool link_is_ready_to_call_set_link(Request *req) {
 
                 req->userdata = UINT32_TO_PTR(m);
                 break;
+        }
+        case SET_LINK_MTU: {
+                Request req_ipoib = {
+                        .link = link,
+                        .type = REQUEST_TYPE_SET_LINK,
+                        .set_link_operation_ptr = INT_TO_PTR(SET_LINK_IPOIB),
+                };
+
+                return !ordered_set_contains(link->manager->request_queue, &req_ipoib);
         }
         default:
                 break;
@@ -777,25 +816,40 @@ int link_request_to_set_group(Link *link) {
 }
 
 int link_request_to_set_mac(Link *link, bool allow_retry) {
+        int r;
+
         assert(link);
         assert(link->network);
 
-        if (!link->network->mac)
+        if (link->network->hw_addr.length == 0)
                 return 0;
 
-        if (link->hw_addr.length != sizeof(struct ether_addr)) {
-                /* Note that for now we only support changing hardware addresses on Ethernet. */
-                log_link_debug(link, "Size of the hardware address (%zu) does not match the size of MAC address (%zu), ignoring.",
-                               link->hw_addr.length, sizeof(struct ether_addr));
-                return 0;
-        }
+        link->requested_hw_addr = link->network->hw_addr;
+        r = net_verify_hardware_address(link->ifname, /* is_static = */ true,
+                                        link->iftype, &link->hw_addr, &link->requested_hw_addr);
+        if (r < 0)
+                return r;
 
-        if (ether_addr_equal(&link->hw_addr.ether, link->network->mac))
+        if (hw_addr_equal(&link->hw_addr, &link->requested_hw_addr))
                 return 0;
 
         return link_request_set_link(link, SET_LINK_MAC,
                                      allow_retry ? link_set_mac_allow_retry_handler : link_set_mac_handler,
                                      NULL);
+}
+
+int link_request_to_set_ipoib(Link *link) {
+        assert(link);
+        assert(link->network);
+
+        if (link->iftype != ARPHRD_INFINIBAND)
+                return 0;
+
+        if (link->network->ipoib_mode < 0 &&
+            link->network->ipoib_umcast < 0)
+                return 0;
+
+        return link_request_set_link(link, SET_LINK_IPOIB, link_set_ipoib_handler, NULL);
 }
 
 int link_request_to_set_master(Link *link) {
@@ -903,7 +957,42 @@ int link_configure_mtu(Link *link) {
         return link_request_to_set_mtu(link, mtu);
 }
 
-static int link_up_or_down_handler_internal(sd_netlink *rtnl, sd_netlink_message *m, Link *link, bool up, bool check_ready) {
+static int link_up_dsa_slave(Link *link) {
+        Link *master;
+        int r;
+
+        assert(link);
+
+        /* For older kernels (specifically, older than 9d5ef190e5615a7b63af89f88c4106a5bc127974, kernel-5.12),
+         * it is necessary to bring up a DSA slave that its master interface is already up. And bringing up
+         * the slave fails with -ENETDOWN. So, let's bring up the master even if it is not managed by us,
+         * and try to bring up the slave after the master becomes up. */
+
+        if (link->dsa_master_ifindex <= 0)
+                return 0;
+
+        if (!streq_ptr(link->driver, "dsa"))
+                return 0;
+
+        if (link_get_by_index(link->manager, link->dsa_master_ifindex, &master) < 0)
+                return 0;
+
+        if (master->state == LINK_STATE_UNMANAGED) {
+                /* If the DSA master interface is unmanaged, then it will never become up.
+                 * Let's request to bring up the master. */
+                r = link_request_to_bring_up_or_down(master, /* up = */ true);
+                if (r < 0)
+                        return r;
+        }
+
+        r = link_request_to_bring_up_or_down(link, /* up = */ true);
+        if (r < 0)
+                return r;
+
+        return 1;
+}
+
+static int link_up_or_down_handler_internal(sd_netlink *rtnl, sd_netlink_message *m, Link *link, bool up, bool on_activate) {
         int r;
 
         assert(m);
@@ -913,10 +1002,19 @@ static int link_up_or_down_handler_internal(sd_netlink *rtnl, sd_netlink_message
                 goto on_error;
 
         r = sd_netlink_message_get_errno(m);
-        if (r < 0)
-                log_link_message_warning_errno(link, m, r, up ?
-                                               "Could not bring up interface, ignoring" :
-                                               "Could not bring down interface, ignoring");
+        if (r == -ENETDOWN && up && link_up_dsa_slave(link) > 0)
+                log_link_message_debug_errno(link, m, r, "Could not bring up dsa slave, retrying again after dsa master becomes up");
+        else if (r < 0) {
+                const char *error_msg;
+
+                error_msg = up ?
+                        (on_activate ? "Could not bring up interface" : "Could not bring up interface, ignoring") :
+                        (on_activate ? "Could not bring down interface" : "Could not bring down interface, ignoring");
+
+                log_link_message_warning_errno(link, m, r, error_msg);
+                if (on_activate)
+                        goto on_error;
+        }
 
         r = link_call_getlink(link, get_link_update_flag_handler);
         if (r < 0) {
@@ -924,7 +1022,7 @@ static int link_up_or_down_handler_internal(sd_netlink *rtnl, sd_netlink_message
                 goto on_error;
         }
 
-        if (check_ready) {
+        if (on_activate) {
                 link->activated = true;
                 link_check_ready(link);
         }
@@ -939,19 +1037,19 @@ on_error:
 }
 
 static int link_activate_up_handler(sd_netlink *rtnl, sd_netlink_message *m, Link *link) {
-        return link_up_or_down_handler_internal(rtnl, m, link, true, true);
+        return link_up_or_down_handler_internal(rtnl, m, link, /* up = */ true, /* on_activate = */ true);
 }
 
 static int link_activate_down_handler(sd_netlink *rtnl, sd_netlink_message *m, Link *link) {
-        return link_up_or_down_handler_internal(rtnl, m, link, false, true);
+        return link_up_or_down_handler_internal(rtnl, m, link, /* up = */ false, /* on_activate = */ true);
 }
 
 static int link_up_handler(sd_netlink *rtnl, sd_netlink_message *m, Link *link) {
-        return link_up_or_down_handler_internal(rtnl, m, link, true, false);
+        return link_up_or_down_handler_internal(rtnl, m, link, /* up = */ true, /* on_activate = */ false);
 }
 
 static int link_down_handler(sd_netlink *rtnl, sd_netlink_message *m, Link *link) {
-        return link_up_or_down_handler_internal(rtnl, m, link, false, false);
+        return link_up_or_down_handler_internal(rtnl, m, link, /* up = */ false, /* on_activate = */ false);
 }
 
 static const char *up_or_down(bool up) {
@@ -1078,8 +1176,20 @@ int link_request_to_activate(Link *link) {
         return 0;
 }
 
-static bool link_is_ready_to_bring_up_or_down(Link *link) {
+static bool link_is_ready_to_bring_up_or_down(Link *link, bool up) {
         assert(link);
+
+        if (up && link->dsa_master_ifindex > 0) {
+                Link *master;
+
+                /* The master interface must be up. See comments in link_up_dsa_slave(). */
+
+                if (link_get_by_index(link->manager, link->dsa_master_ifindex, &master) < 0)
+                        return false;
+
+                if (!FLAGS_SET(master->flags, IFF_UP))
+                        return false;
+        }
 
         if (link->state == LINK_STATE_UNMANAGED)
                 return true;
@@ -1108,7 +1218,7 @@ int request_process_link_up_or_down(Request *req) {
         link = req->link;
         up = PTR_TO_INT(req->userdata);
 
-        if (!link_is_ready_to_bring_up_or_down(link))
+        if (!link_is_ready_to_bring_up_or_down(link, up))
                 return 0;
 
         r = link_up_or_down(link, up, req->netlink_handler);
@@ -1133,5 +1243,45 @@ int link_request_to_bring_up_or_down(Link *link, bool up) {
         req->userdata = INT_TO_PTR(up);
 
         log_link_debug(link, "Requested to bring link %s", up_or_down(up));
+        return 0;
+}
+
+static int link_remove_handler(sd_netlink *rtnl, sd_netlink_message *m, Link *link) {
+        int r;
+
+        assert(m);
+        assert(link);
+
+        if (IN_SET(link->state, LINK_STATE_FAILED, LINK_STATE_LINGER))
+                return 0;
+
+        r = sd_netlink_message_get_errno(m);
+        if (r < 0)
+                log_link_message_warning_errno(link, m, r, "Could not remove interface, ignoring");
+
+        return 0;
+}
+
+int link_remove(Link *link) {
+        _cleanup_(sd_netlink_message_unrefp) sd_netlink_message *req = NULL;
+        int r;
+
+        assert(link);
+        assert(link->manager);
+        assert(link->manager->rtnl);
+
+        log_link_debug(link, "Removing link.");
+
+        r = sd_rtnl_message_new_link(link->manager->rtnl, &req, RTM_DELLINK, link->ifindex);
+        if (r < 0)
+                return log_link_debug_errno(link, r, "Could not allocate RTM_DELLINK message: %m");
+
+        r = netlink_call_async(link->manager->rtnl, NULL, req, link_remove_handler,
+                               link_netlink_destroy_callback, link);
+        if (r < 0)
+                return log_link_debug_errno(link, r, "Could not send rtnetlink message: %m");
+
+        link_ref(link);
+
         return 0;
 }

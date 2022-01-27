@@ -32,7 +32,8 @@ libtimesyncd_core = static_library(
         'timesyncd-core',
         sources,
         include_directories : includes,
-        link_with : [timesyncd_link_with])
+        link_with : timesyncd_link_with,
+        build_by_default : false)
 
 custom_target(
         'timesyncd.conf',
@@ -54,7 +55,7 @@ endif
 ############################################################
 
 tests += [
-        [['src/timesync/test-timesync.c'],
+        [files('test-timesync.c'),
          [libtimesyncd_core,
           libshared],
          [libm]],

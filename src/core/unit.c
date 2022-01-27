@@ -2129,7 +2129,7 @@ bool unit_is_bound_by_inactive(Unit *u, Unit **ret_culprit) {
                         continue;
 
                 if (UNIT_IS_INACTIVE_OR_FAILED(unit_active_state(other))) {
-                        if (*ret_culprit)
+                        if (ret_culprit)
                                 *ret_culprit = other;
 
                         return true;
@@ -2222,17 +2222,24 @@ void unit_start_on_failure(
 
         UNIT_FOREACH_DEPENDENCY(other, u, atom) {
                 _cleanup_(sd_bus_error_free) sd_bus_error error = SD_BUS_ERROR_NULL;
+                Job *job = NULL;
 
                 if (!logged) {
                         log_unit_info(u, "Triggering %s dependencies.", dependency_name);
                         logged = true;
                 }
 
-                r = manager_add_job(u->manager, JOB_START, other, job_mode, NULL, &error, NULL);
+                r = manager_add_job(u->manager, JOB_START, other, job_mode, NULL, &error, &job);
                 if (r < 0)
                         log_unit_warning_errno(
                                         u, r, "Failed to enqueue %s job, ignoring: %s",
                                         dependency_name, bus_error_message(&error, r));
+                else if (job)
+                        /* u will be kept pinned since both UNIT_ON_FAILURE and UNIT_ON_SUCCESS includes
+                         * UNIT_ATOM_BACK_REFERENCE_IMPLIED. We save the triggering unit here since we
+                         * want to be able to reference it when we come to run the OnFailure= or OnSuccess=
+                         * dependency. */
+                        job_add_triggering_unit(job, u);
         }
 
         if (logged)
@@ -2304,8 +2311,8 @@ static int unit_log_resources(Unit *u) {
                 message_parts[n_message_parts++] = t;
 
                 log_level = raise_level(log_level,
-                                        nsec > NOTICEWORTHY_CPU_NSEC,
-                                        nsec > MENTIONWORTHY_CPU_NSEC);
+                                        nsec > MENTIONWORTHY_CPU_NSEC,
+                                        nsec > NOTICEWORTHY_CPU_NSEC);
         }
 
         for (CGroupIOAccountingMetric k = 0; k < _CGROUP_IO_ACCOUNTING_METRIC_MAX; k++) {
@@ -3108,6 +3115,20 @@ int unit_add_dependency(
 
         if (inverse_table[d] != _UNIT_DEPENDENCY_INVALID && inverse_table[d] != d) {
                 r = unit_add_dependency_hashmap(&other->dependencies, inverse_table[d], u, 0, mask);
+                if (r < 0)
+                        return r;
+                if (r)
+                        noop = false;
+        }
+
+        if (FLAGS_SET(a, UNIT_ATOM_BACK_REFERENCE_IMPLIED)) {
+                r = unit_add_dependency_hashmap(&other->dependencies, UNIT_REFERENCES, u, 0, mask);
+                if (r < 0)
+                        return r;
+                if (r)
+                        noop = false;
+
+                r = unit_add_dependency_hashmap(&u->dependencies, UNIT_REFERENCED_BY, other, 0, mask);
                 if (r < 0)
                         return r;
                 if (r)
@@ -5864,16 +5885,6 @@ Condition *unit_find_failed_condition(Unit *u) {
                         return c;
 
         return failed_trigger && !has_succeeded_trigger ? failed_trigger : NULL;
-}
-
-bool unit_has_failed_condition_or_assert(Unit *u) {
-        if (dual_timestamp_is_set(&u->condition_timestamp) && !u->condition_result)
-                return true;
-
-        if (dual_timestamp_is_set(&u->assert_timestamp) && !u->assert_result)
-                return true;
-
-        return false;
 }
 
 static const char* const collect_mode_table[_COLLECT_MODE_MAX] = {

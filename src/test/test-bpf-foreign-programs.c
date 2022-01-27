@@ -162,7 +162,7 @@ static int pin_programs(Unit *u, CGroupContext *cc, const Test *test_suite, size
                 if (r < 0)
                         return log_error_errno(r, "Failed to convert program to string");
 
-                r = bpf_program_new(test_suite[i].prog_type, &prog);
+                r = bpf_program_new(test_suite[i].prog_type, "sd_trivial", &prog);
                 if (r < 0)
                         return log_error_errno(r, "Failed to create program '%s'", str);
 
@@ -289,11 +289,11 @@ int main(int argc, char *argv[]) {
         (void) setrlimit_closest(RLIMIT_MEMLOCK, &rl);
 
         if (!can_memlock())
-                return log_tests_skipped("Can't use mlock(), skipping.");
+                return log_tests_skipped("Can't use mlock()");
 
         r = cg_all_unified();
         if (r <= 0)
-                return log_tests_skipped("Unified hierarchy is required, skipping.");
+                return log_tests_skipped("Unified hierarchy is required");
 
         r = enter_cgroup_subroot(NULL);
         if (r == -ENOMEDIUM)

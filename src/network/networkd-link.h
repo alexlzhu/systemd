@@ -19,6 +19,7 @@
 
 #include "ether-addr-util.h"
 #include "log-link.h"
+#include "netif-util.h"
 #include "network-util.h"
 #include "networkd-util.h"
 #include "ordered-set.h"
@@ -48,6 +49,7 @@ typedef struct Link {
 
         int ifindex;
         int master_ifindex;
+        int dsa_master_ifindex;
         char *ifname;
         char **alternative_names;
         char *kind;
@@ -56,6 +58,7 @@ typedef struct Link {
         struct hw_addr_data hw_addr;
         struct hw_addr_data bcast_addr;
         struct hw_addr_data permanent_hw_addr;
+        struct hw_addr_data requested_hw_addr;
         struct in6_addr ipv6ll_address;
         uint32_t mtu;
         uint32_t min_mtu;
@@ -113,6 +116,7 @@ typedef struct Link {
         bool dhcp4_route_failed:1;
         bool dhcp4_route_retrying:1;
         bool dhcp4_configured:1;
+        char *dhcp4_6rd_tunnel_name;
 
         sd_ipv4ll *ipv4ll;
         bool ipv4ll_address_configured:1;
@@ -145,11 +149,12 @@ typedef struct Link {
 
         sd_dhcp6_client *dhcp6_client;
         sd_dhcp6_lease *dhcp6_lease;
-        Set *dhcp6_pd_prefixes;
         unsigned dhcp6_messages;
-        unsigned dhcp6_pd_messages;
-        bool dhcp6_configured:1;
-        bool dhcp6_pd_configured:1;
+        bool dhcp6_configured;
+
+        Set *dhcp_pd_prefixes;
+        unsigned dhcp_pd_messages;
+        bool dhcp_pd_configured;
 
         /* This is about LLDP reception */
         sd_lldp_rx *lldp_rx;
@@ -208,10 +213,14 @@ void link_check_ready(Link *link);
 
 void link_update_operstate(Link *link, bool also_update_bond_master);
 
-bool link_has_carrier(Link *link);
+static inline bool link_has_carrier(Link *link) {
+        assert(link);
+        return netif_has_carrier(link->kernel_operstate, link->flags);
+}
 
 bool link_ipv6_enabled(Link *link);
 bool link_ipv6ll_enabled(Link *link);
+bool link_may_have_ipv6ll(Link *link);
 int link_ipv6ll_gained(Link *link);
 
 bool link_ipv4ll_enabled(Link *link);
@@ -226,3 +235,6 @@ int link_reconfigure_after_sleep(Link *link);
 
 int manager_udev_process_link(sd_device_monitor *monitor, sd_device *device, void *userdata);
 int manager_rtnl_process_link(sd_netlink *rtnl, sd_netlink_message *message, Manager *m);
+
+int link_flags_to_string_alloc(uint32_t flags, char **ret);
+const char *kernel_operstate_to_string(int t) _const_;

@@ -573,6 +573,50 @@ int config_parse_many(
         return config_parse_many_files(conf_files, files, sections, lookup, table, flags, userdata, ret_stats_by_path);
 }
 
+static void config_section_hash_func(const ConfigSection *c, struct siphash *state) {
+        siphash24_compress_string(c->filename, state);
+        siphash24_compress(&c->line, sizeof(c->line), state);
+}
+
+static int config_section_compare_func(const ConfigSection *x, const ConfigSection *y) {
+        int r;
+
+        r = strcmp(x->filename, y->filename);
+        if (r != 0)
+                return r;
+
+        return CMP(x->line, y->line);
+}
+
+DEFINE_HASH_OPS(config_section_hash_ops, ConfigSection, config_section_hash_func, config_section_compare_func);
+
+int config_section_new(const char *filename, unsigned line, ConfigSection **s) {
+        ConfigSection *cs;
+
+        cs = malloc0(offsetof(ConfigSection, filename) + strlen(filename) + 1);
+        if (!cs)
+                return -ENOMEM;
+
+        strcpy(cs->filename, filename);
+        cs->line = line;
+
+        *s = TAKE_PTR(cs);
+
+        return 0;
+}
+
+unsigned hashmap_find_free_section_line(Hashmap *hashmap) {
+        ConfigSection *cs;
+        unsigned n = 0;
+        void *entry;
+
+        HASHMAP_FOREACH_KEY(entry, cs, hashmap)
+                if (n < cs->line)
+                        n = cs->line;
+
+        return n + 1;
+}
+
 #define DEFINE_PARSER(type, vartype, conv_func)                         \
         DEFINE_CONFIG_PARSE_PTR(config_parse_##type, conv_func, vartype, "Failed to parse " #type " value")
 
@@ -675,6 +719,31 @@ int config_parse_iec_uint64(
                 log_syntax(unit, LOG_WARNING, filename, line, r, "Failed to parse size value, ignoring: %s", rvalue);
 
         return 0;
+}
+
+int config_parse_iec_uint64_infinity(
+                const char* unit,
+                const char *filename,
+                unsigned line,
+                const char *section,
+                unsigned section_line,
+                const char *lvalue,
+                int ltype,
+                const char *rvalue,
+                void *data,
+                void *userdata) {
+
+        uint64_t *bytes = data;
+
+        assert(rvalue);
+        assert(data);
+
+        if (streq(rvalue, "infinity")) {
+                *bytes = UINT64_MAX;
+                return 0;
+        }
+
+        return config_parse_iec_uint64(unit, filename, line, section, section_line, lvalue, ltype, rvalue, data, userdata);
 }
 
 int config_parse_bool(

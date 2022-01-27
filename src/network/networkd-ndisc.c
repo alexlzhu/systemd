@@ -37,7 +37,7 @@ bool link_ipv6_accept_ra_enabled(Link *link) {
         if (!link->network)
                 return false;
 
-        if (!link_ipv6ll_enabled(link))
+        if (!link_may_have_ipv6ll(link))
                 return false;
 
         assert(link->network->ipv6_accept_ra >= 0);
@@ -90,7 +90,7 @@ static int ndisc_remove(Link *link, struct in6_addr *router) {
                 if (k < 0)
                         r = k;
 
-                route_cancel_request(route);
+                route_cancel_request(route, link);
         }
 
         SET_FOREACH(address, link->addresses) {
@@ -611,6 +611,11 @@ static int ndisc_router_process_route(Link *link, sd_ndisc_router *rt) {
         r = sd_ndisc_router_route_get_prefixlen(rt, &prefixlen);
         if (r < 0)
                 return log_link_error_errno(link, r, "Failed to get route prefix length: %m");
+
+        if (in6_addr_is_null(&dst) && prefixlen == 0) {
+                log_link_debug(link, "Route prefix is ::/0, ignoring");
+                return 0;
+        }
 
         if (in6_prefix_is_filtered(&dst, prefixlen, link->network->ndisc_allow_listed_route_prefix, link->network->ndisc_deny_listed_route_prefix)) {
                 if (DEBUG_LOGGING) {

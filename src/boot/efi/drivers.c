@@ -25,10 +25,7 @@ static EFI_STATUS load_one_driver(
         assert(loaded_image);
         assert(fname);
 
-        spath = PoolPrint(L"\\EFI\\systemd\\drivers\\%s", fname);
-        if (!spath)
-                return log_oom();
-
+        spath = xpool_print(L"\\EFI\\systemd\\drivers\\%s", fname);
         path = FileDevicePath(loaded_image->DeviceHandle, spath);
         if (!path)
                 return log_oom();
@@ -46,8 +43,13 @@ static EFI_STATUS load_one_driver(
                 return log_error_status_stall(EFI_INVALID_PARAMETER, L"Image %s is not a driver, refusing: %r", fname);
 
         err = BS->StartImage(image, NULL, NULL);
-        if (EFI_ERROR(err))
-                return log_error_status_stall(err, L"Failed to start image %s: %r", fname, err);
+        if (EFI_ERROR(err)) {
+                /* EFI_ABORTED signals an initializing driver. It uses this error code on success
+                 * so that it is unloaded after. */
+                if (err != EFI_ABORTED)
+                        log_error_stall(L"Failed to start image %s: %r", fname, err);
+                return err;
+        }
 
         TAKE_PTR(image);
         return EFI_SUCCESS;
@@ -78,9 +80,9 @@ static EFI_STATUS reconnect(void) {
 EFI_STATUS load_drivers(
                 EFI_HANDLE parent_image,
                 EFI_LOADED_IMAGE *loaded_image,
-                EFI_FILE_HANDLE root_dir) {
+                EFI_FILE *root_dir) {
 
-        _cleanup_(FileHandleClosep) EFI_FILE_HANDLE drivers_dir = NULL;
+        _cleanup_(file_closep) EFI_FILE *drivers_dir = NULL;
         _cleanup_freepool_ EFI_FILE_INFO *dirent = NULL;
         UINTN dirent_size = 0, n_succeeded = 0;
         EFI_STATUS err;

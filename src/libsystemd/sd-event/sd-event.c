@@ -2095,7 +2095,7 @@ _public_ int sd_event_add_inotify(
                 sd_event_inotify_handler_t callback,
                 void *userdata) {
 
-        sd_event_source *s;
+        sd_event_source *s = NULL; /* avoid false maybe-uninitialized warning */
         int fd, r;
 
         assert_return(path, -EINVAL);
@@ -3142,7 +3142,7 @@ static int flush_timer(sd_event *e, int fd, uint32_t events, usec_t *next) {
 
         ss = read(fd, &x, sizeof(x));
         if (ss < 0) {
-                if (IN_SET(errno, EAGAIN, EINTR))
+                if (ERRNO_IS_TRANSIENT(errno))
                         return 0;
 
                 return -errno;
@@ -3348,7 +3348,7 @@ static int process_signal(sd_event *e, struct signal_data *d, uint32_t events, i
 
                 n = read(d->fd, &si, sizeof(si));
                 if (n < 0) {
-                        if (IN_SET(errno, EAGAIN, EINTR))
+                        if (ERRNO_IS_TRANSIENT(errno))
                                 return 0;
 
                         return -errno;
@@ -3402,7 +3402,7 @@ static int event_inotify_data_read(sd_event *e, struct inotify_data *d, uint32_t
 
         n = read(d->fd, &d->buffer, sizeof(d->buffer));
         if (n < 0) {
-                if (IN_SET(errno, EAGAIN, EINTR))
+                if (ERRNO_IS_TRANSIENT(errno))
                         return 0;
 
                 return -errno;
@@ -4218,7 +4218,7 @@ _public_ int sd_event_run(sd_event *e, uint64_t timeout) {
 
                 this_run = now(CLOCK_MONOTONIC);
 
-                l = u64log2(this_run - e->last_run_usec);
+                l = log2u64(this_run - e->last_run_usec);
                 assert(l < ELEMENTSOF(e->delays));
                 e->delays[l]++;
 

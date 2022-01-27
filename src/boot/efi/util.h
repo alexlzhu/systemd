@@ -13,7 +13,7 @@
 /* This TPM PCR is where most Linux infrastructure extends the initrd binary images into, and so do we. */
 #define TPM_PCR_INDEX_INITRD 4
 
-#define OFFSETOF(x,y) __builtin_offsetof(x,y)
+#define offsetof(type, member) __builtin_offsetof(type, member)
 
 #define UINTN_MAX (~(UINTN)0)
 #define INTN_MAX ((INTN)(UINTN_MAX>>1))
@@ -23,6 +23,22 @@
 #ifndef UINT64_MAX
 #define UINT64_MAX ((UINT64) -1)
 #endif
+
+#define xnew_alloc(type, n, alloc)                                           \
+        ({                                                                   \
+                UINTN _alloc_size;                                           \
+                if (__builtin_mul_overflow(sizeof(type), (n), &_alloc_size)) \
+                        assert_not_reached();                                \
+                (type *) alloc(_alloc_size);                                 \
+        })
+
+#define xallocate_pool(size) ASSERT_PTR(AllocatePool(size))
+#define xallocate_zero_pool(size) ASSERT_PTR(AllocateZeroPool(size))
+#define xreallocate_pool(p, old_size, new_size) ASSERT_PTR(ReallocatePool((p), (old_size), (new_size)))
+#define xpool_print(fmt, ...) ((CHAR16 *) ASSERT_PTR(PoolPrint((fmt), ##__VA_ARGS__)))
+#define xstrdup(str) ((CHAR16 *) ASSERT_PTR(StrDuplicate(str)))
+#define xnew(type, n) xnew_alloc(type, (n), xallocate_pool)
+#define xnew0(type, n) xnew_alloc(type, (n), xallocate_zero_pool)
 
 EFI_STATUS parse_boolean(const CHAR8 *v, BOOLEAN *b);
 
@@ -45,23 +61,23 @@ EFI_STATUS efivar_get_uint64_le(const EFI_GUID *vendor, const CHAR16 *name, UINT
 EFI_STATUS efivar_get_boolean_u8(const EFI_GUID *vendor, const CHAR16 *name, BOOLEAN *ret);
 
 CHAR8 *strchra(const CHAR8 *s, CHAR8 c);
-CHAR16 *stra_to_path(const CHAR8 *stra);
-CHAR16 *stra_to_str(const CHAR8 *stra);
+CHAR16 *xstra_to_path(const CHAR8 *stra);
+CHAR16 *xstra_to_str(const CHAR8 *stra);
 
-EFI_STATUS file_read(EFI_FILE_HANDLE dir, const CHAR16 *name, UINTN off, UINTN size, CHAR8 **content, UINTN *content_size);
+EFI_STATUS file_read(EFI_FILE *dir, const CHAR16 *name, UINTN off, UINTN size, CHAR8 **content, UINTN *content_size);
 
-static inline void FreePoolp(void *p) {
+static inline void free_poolp(void *p) {
         void *q = *(void**) p;
 
         if (!q)
                 return;
 
-        FreePool(q);
+        (void) BS->FreePool(q);
 }
 
-#define _cleanup_freepool_ _cleanup_(FreePoolp)
+#define _cleanup_freepool_ _cleanup_(free_poolp)
 
-static inline void FileHandleClosep(EFI_FILE_HANDLE *handle) {
+static inline void file_closep(EFI_FILE **handle) {
         if (!*handle)
                 return;
 
@@ -88,25 +104,22 @@ EFI_STATUS log_oom(void);
                 err; \
         })
 
-void *memmem_safe(const void *haystack, UINTN haystack_len, const void *needle, UINTN needle_len);
-
-static inline void *mempmem_safe(const void *haystack, UINTN haystack_len, const void *needle, UINTN needle_len) {
-        CHAR8 *p = memmem_safe(haystack, haystack_len, needle, needle_len);
-        return p ? p + needle_len : NULL;
-}
-
 void print_at(UINTN x, UINTN y, UINTN attr, const CHAR16 *str);
 void clear_screen(UINTN attr);
 
 typedef INTN (*compare_pointer_func_t)(const void *a, const void *b);
 void sort_pointer_array(void **array, UINTN n_members, compare_pointer_func_t compare);
 
-EFI_STATUS get_file_info_harder(EFI_FILE_HANDLE handle, EFI_FILE_INFO **ret, UINTN *ret_size);
+EFI_STATUS get_file_info_harder(EFI_FILE *handle, EFI_FILE_INFO **ret, UINTN *ret_size);
 
-EFI_STATUS readdir_harder(EFI_FILE_HANDLE handle, EFI_FILE_INFO **buffer, UINTN *buffer_size);
+EFI_STATUS readdir_harder(EFI_FILE *handle, EFI_FILE_INFO **buffer, UINTN *buffer_size);
 
 UINTN strnlena(const CHAR8 *p, UINTN maxlen);
-CHAR8 *strndup8(const CHAR8 *p, UINTN sz);
+CHAR8 *xstrndup8(const CHAR8 *p, UINTN sz);
+INTN strncasecmpa(const CHAR8 *a, const CHAR8 *b, UINTN maxlen);
+static inline BOOLEAN strncaseeqa(const CHAR8 *a, const CHAR8 *b, UINTN maxlen) {
+        return strncasecmpa(a, b, maxlen) == 0;
+}
 
 BOOLEAN is_ascii(const CHAR16 *f);
 
@@ -116,7 +129,7 @@ static inline void strv_freep(CHAR16 ***p) {
         strv_free(*p);
 }
 
-EFI_STATUS open_directory(EFI_FILE_HANDLE root_dir, const CHAR16 *path, EFI_FILE_HANDLE *ret);
+EFI_STATUS open_directory(EFI_FILE *root_dir, const CHAR16 *path, EFI_FILE **ret);
 
 /* Conversion between EFI_PHYSICAL_ADDRESS and pointers is not obvious. The former is always 64bit, even on
  * 32bit archs. And gcc complains if we cast a pointer to an integer of a different size. Hence let's do the
@@ -139,3 +152,19 @@ static inline void *PHYSICAL_ADDRESS_TO_POINTER(EFI_PHYSICAL_ADDRESS addr) {
 }
 
 UINT64 get_os_indications_supported(void);
+
+#ifdef EFI_DEBUG
+void debug_break(void);
+extern UINT8 _text, _data;
+/* Report the relocated position of text and data sections so that a debugger
+ * can attach to us. See debug-sd-boot.sh for how this can be done. */
+#  define debug_hook(identity) Print(identity L"@0x%x,0x%x\n", &_text, &_data)
+#else
+#  define debug_hook(identity)
+#endif
+
+#if defined(__i386__) || defined(__x86_64__)
+void beep(UINTN beep_count);
+#else
+static inline void beep(UINTN beep_count) {}
+#endif
