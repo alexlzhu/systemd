@@ -624,14 +624,8 @@ DnsScopeMatch dns_scope_good_domain(
             dns_name_equal(domain, "1.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.ip6.arpa") > 0)
                 return DNS_SCOPE_NO;
 
-        /* Never respond to some of the domains listed in RFC6303 */
-        if (dns_name_endswith(domain, "0.in-addr.arpa") > 0 ||
-            dns_name_equal(domain, "255.255.255.255.in-addr.arpa") > 0 ||
-            dns_name_equal(domain, "0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.ip6.arpa") > 0)
-                return DNS_SCOPE_NO;
-
-        /* Never respond to some of the domains listed in RFC6761 */
-        if (dns_name_endswith(domain, "invalid") > 0)
+        /* Never respond to some of the domains listed in RFC6303 + RFC6761 */
+        if (dns_name_dont_resolve(domain))
                 return DNS_SCOPE_NO;
 
         /* Never go to network for the _gateway or _outbound domain — they're something special, synthesized locally. */
@@ -1458,12 +1452,16 @@ int dns_scope_announce(DnsScope *scope, bool goodbye) {
                                                   "_services._dns-sd._udp.local");
                 if (!rr)
                         return log_oom();
+
                 rr->ptr.name = strdup(service_type);
+                if (!rr->ptr.name)
+                        return log_oom();
+
                 rr->ttl = MDNS_DEFAULT_TTL;
 
                 r = dns_zone_put(&scope->zone, scope, rr, false);
                 if (r < 0)
-                        log_warning_errno(r, "Failed to add DNS-SD PTR record to MDNS zone: %m");
+                        log_warning_errno(r, "Failed to add DNS-SD PTR record to MDNS zone, ignoring: %m");
 
                 r = dns_answer_add(answer, rr, 0, 0, NULL);
                 if (r < 0)

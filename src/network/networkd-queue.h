@@ -14,6 +14,7 @@ typedef struct NetDev NetDev;
 typedef struct NextHop NextHop;
 typedef struct Route Route;
 typedef struct RoutingPolicyRule RoutingPolicyRule;
+typedef struct TrafficControl TrafficControl;
 
 typedef enum RequestType {
         REQUEST_TYPE_ACTIVATE_LINK,
@@ -25,6 +26,7 @@ typedef enum RequestType {
         REQUEST_TYPE_DHCP4_CLIENT,
         REQUEST_TYPE_DHCP6_CLIENT,
         REQUEST_TYPE_IPV6_PROXY_NDP,
+        REQUEST_TYPE_NDISC,
         REQUEST_TYPE_NEIGHBOR,
         REQUEST_TYPE_NEXTHOP,
         REQUEST_TYPE_RADV,
@@ -32,6 +34,7 @@ typedef enum RequestType {
         REQUEST_TYPE_ROUTING_POLICY_RULE,
         REQUEST_TYPE_SET_LINK,
         REQUEST_TYPE_STACKED_NETDEV,
+        REQUEST_TYPE_TRAFFIC_CONTROL,
         REQUEST_TYPE_UP_DOWN,
         _REQUEST_TYPE_MAX,
         _REQUEST_TYPE_INVALID = -EINVAL,
@@ -53,6 +56,7 @@ typedef struct Request {
                 RoutingPolicyRule *rule;
                 void *set_link_operation_ptr;
                 NetDev *netdev;
+                TrafficControl *traffic_control;
                 void *object;
         };
         void *userdata;

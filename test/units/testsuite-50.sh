@@ -308,7 +308,8 @@ systemd-run -P --property ExtensionImages="/usr/share/app0.raw /usr/share/app1.r
 cat >/run/systemd/system/testservice-50e.service <<EOF
 [Service]
 MountAPIVFS=yes
-TemporaryFileSystem=/run
+TemporaryFileSystem=/run /var/lib
+StateDirectory=app0
 RootImage=${image}.raw
 ExtensionImages=/usr/share/app0.raw /usr/share/app1.raw:nosuid
 # Relevant only for sanitizer runs
@@ -323,7 +324,7 @@ systemctl is-active testservice-50e.service
 
 # ExtensionDirectories will set up an overlay
 mkdir -p "${image_dir}/app0" "${image_dir}/app1"
-systemd-run -P --property ExtensionDirectories="${image_dir}/nonexistant" --property RootImage="${image}.raw" cat /opt/script0.sh && { echo 'unexpected success'; exit 1; }
+systemd-run -P --property ExtensionDirectories="${image_dir}/nonexistent" --property RootImage="${image}.raw" cat /opt/script0.sh && { echo 'unexpected success'; exit 1; }
 systemd-run -P --property ExtensionDirectories="${image_dir}/app0" --property RootImage="${image}.raw" cat /opt/script0.sh && { echo 'unexpected success'; exit 1; }
 systemd-dissect --mount /usr/share/app0.raw "${image_dir}/app0"
 systemd-dissect --mount /usr/share/app1.raw "${image_dir}/app1"
@@ -336,7 +337,8 @@ systemd-run -P --property ExtensionDirectories="${image_dir}/app0 ${image_dir}/a
 cat >/run/systemd/system/testservice-50f.service <<EOF
 [Service]
 MountAPIVFS=yes
-TemporaryFileSystem=/run
+TemporaryFileSystem=/run /var/lib
+StateDirectory=app0
 RootImage=${image}.raw
 ExtensionDirectories=${image_dir}/app0 ${image_dir}/app1
 # Relevant only for sanitizer runs

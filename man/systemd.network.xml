@@ -944,8 +944,10 @@ Table=1234</programlisting></para>
           lease expires. This is contrary to the DHCP specification, but may be the best choice if,
           e.g., the root filesystem relies on this connection. The setting <literal>dhcp</literal>
           implies <literal>dhcp-on-stop</literal>, and <literal>yes</literal> implies
-          <literal>dhcp</literal> and <literal>static</literal>. Defaults to <literal>no</literal>.
-          </para>
+          <literal>dhcp</literal> and <literal>static</literal>. Defaults to
+          <literal>dhcp-on-stop</literal> when <command>systemd-networkd</command> is running in
+          initrd, <literal>yes</literal> when the root filesystem is a network filesystem, and
+          <literal>no</literal> otherwise.</para>
         </listitem>
       </varlistentry>
     </variablelist>
@@ -2558,18 +2560,24 @@ Token=prefixstable:2002:da8:1::</programlisting></para>
         <term><varname>DNS=</varname></term>
 
         <listitem><para><varname>EmitDNS=</varname> takes a boolean. Configures whether the DHCP leases
-        handed out to clients shall contain DNS server information. Defaults to <literal>yes</literal>.  The
-        DNS servers to pass to clients may be configured with the <varname>DNS=</varname> option, which takes
-        a list of IPv4 addresses. If the <varname>EmitDNS=</varname> option is enabled but no servers
-        configured, the servers are automatically propagated from an "uplink" interface that has appropriate
-        servers set. The "uplink" interface is determined by the default route of the system with the highest
-        priority. Note that this information is acquired at the time the lease is handed out, and does not
-        take uplink interfaces into account that acquire DNS server information at a later point. If no
-        suitable uplink interface is found the DNS server data from <filename>/etc/resolv.conf</filename> is
-        used. Also, note that the leases are not refreshed if the uplink network configuration changes. To
-        ensure clients regularly acquire the most current uplink DNS server information, it is thus advisable
-        to shorten the DHCP lease time via <varname>MaxLeaseTimeSec=</varname> described
-        above.</para></listitem>
+        handed out to clients shall contain DNS server information. Defaults to <literal>yes</literal>.
+        The DNS servers to pass to clients may be configured with the <varname>DNS=</varname> option,
+        which takes a list of IPv4 addresses, or special value <literal>_server_address</literal> which
+        will be converted to the address used by the DHCP server.</para>
+
+        <para>If the <varname>EmitDNS=</varname> option is enabled but no servers configured, the
+        servers are automatically propagated from an "uplink" interface that has appropriate servers
+        set. The "uplink" interface is determined by the default route of the system with the highest
+        priority. Note that this information is acquired at the time the lease is handed out, and does
+        not take uplink interfaces into account that acquire DNS server information at a later point.
+        If no suitable uplink interface is found the DNS server data from
+        <filename>/etc/resolv.conf</filename> is used. Also, note that the leases are not refreshed if
+        the uplink network configuration changes. To ensure clients regularly acquire the most current
+        uplink DNS server information, it is thus advisable to shorten the DHCP lease time via
+        <varname>MaxLeaseTimeSec=</varname> described above.</para>
+
+        <para>This setting can be specified multiple times. If an empty string is specified, then all
+        DNS servers specified earlier are cleared.</para></listitem>
       </varlistentry>
 
       <varlistentry>
@@ -2950,6 +2958,15 @@ Token=prefixstable:2002:da8:1::</programlisting></para>
             <para>Takes a boolean. Configures whether traffic may be sent back out of the port on which it
             was received. When this flag is false, then the bridge will not forward traffic back out of the
             receiving port. When unset, the kernel's default will be used.</para>
+          </listitem>
+        </varlistentry>
+        <varlistentry>
+          <term><varname>Isolated=</varname></term>
+          <listitem>
+            <para>Takes a boolean. Configures whether this port is isolated or not. Within a bridge,
+            isolated ports can only communicate with non-isolated ports. When set to true, this port can only
+            communicate with other ports whose Isolated setting is false.  When set to false, this port
+            can communicate with any other ports. When unset, the kernel's default will be used.</para>
           </listitem>
         </varlistentry>
         <varlistentry>
@@ -3659,7 +3676,7 @@ Token=prefixstable:2002:da8:1::</programlisting></para>
             <varlistentry>
               <term><option>src-host</option></term>
               <listitem><para>
-                Flows are defined only by source address. Equivalnet to the <literal>srchost</literal>
+                Flows are defined only by source address. Equivalent to the <literal>srchost</literal>
                 option for <command>tc qdisc</command> command. See also
                 <citerefentry project='man-pages'><refentrytitle>tc-cake</refentrytitle><manvolnum>8</manvolnum></citerefentry>.
               </para></listitem>
@@ -3667,7 +3684,7 @@ Token=prefixstable:2002:da8:1::</programlisting></para>
             <varlistentry>
               <term><option>dst-host</option></term>
               <listitem><para>
-                Flows are defined only by destination address. Equivalnet to the
+                Flows are defined only by destination address. Equivalent to the
                 <literal>srchost</literal> option for <command>tc qdisc</command> command. See also
                 <citerefentry project='man-pages'><refentrytitle>tc-cake</refentrytitle><manvolnum>8</manvolnum></citerefentry>.
               </para></listitem>
@@ -3693,7 +3710,7 @@ Token=prefixstable:2002:da8:1::</programlisting></para>
               <term><option>dual-src-host</option></term>
               <listitem><para>
                 Flows are defined by the 5-tuple (see <literal>flows</literal> in the above), and
-                fairness is applied first over source addresses, then over individual flows. Equivalnet
+                fairness is applied first over source addresses, then over individual flows. Equivalent
                 to the <literal>dual-srchost</literal> option for <command>tc qdisc</command> command.
                 See also
                 <citerefentry project='man-pages'><refentrytitle>tc-cake</refentrytitle><manvolnum>8</manvolnum></citerefentry>.
@@ -3704,7 +3721,7 @@ Token=prefixstable:2002:da8:1::</programlisting></para>
               <listitem><para>
                 Flows are defined by the 5-tuple (see <literal>flows</literal> in the above), and
                 fairness is applied first over destination addresses, then over individual flows.
-                Equivalnet to the <literal>dual-dsthost</literal> option for
+                Equivalent to the <literal>dual-dsthost</literal> option for
                 <command>tc qdisc</command> command. See also
                 <citerefentry project='man-pages'><refentrytitle>tc-cake</refentrytitle><manvolnum>8</manvolnum></citerefentry>.
               </para></listitem>
@@ -3714,7 +3731,7 @@ Token=prefixstable:2002:da8:1::</programlisting></para>
               <listitem><para>
                 Flows are defined by the 5-tuple (see <literal>flows</literal>), and fairness is
                 applied over source and destination addresses, and also over individual flows.
-                Equivalnet to the <literal>triple-isolate</literal> option for
+                Equivalent to the <literal>triple-isolate</literal> option for
                 <command>tc qdisc</command> command. See also
                 <citerefentry project='man-pages'><refentrytitle>tc-cake</refentrytitle><manvolnum>8</manvolnum></citerefentry>.
               </para></listitem>
@@ -4410,25 +4427,91 @@ DHCP=yes</programlisting>
     </example>
 
     <example>
-      <title>IPv6 Prefix Delegation</title>
+      <title>IPv6 Prefix Delegation (DHCPv6 PD)</title>
 
-      <programlisting># /etc/systemd/network/55-ipv6-pd-upstream.network
+      <programlisting># /etc/systemd/network/55-dhcpv6-pd-upstream.network
 [Match]
 Name=enp1s0
 
 [Network]
-DHCP=ipv6</programlisting>
+DHCP=ipv6
 
-      <programlisting># /etc/systemd/network/56-ipv6-pd-downstream.network
+# The below setting is optional, to also assign an address in the delegated prefix
+# to the upstream interface. If not necessary, then comment out the line below and
+# the [DHCPPrefixDelegation] section.
+DHCPPrefixDelegation=yes
+
+# If the upstream network provides Router Advertisement with Managed bit set,
+# then comment out the line below and WithoutRA= setting in the [DHCPv6] section.
+IPv6AcceptRA=no
+
+[DHCPv6]
+WithoutRA=solicit
+
+[DHCPPrefixDelegation]
+UplinkInterface=:self
+SubnetId=0
+Announce=no</programlisting>
+
+      <programlisting># /etc/systemd/network/55-dhcpv6-pd-downstream.network
 [Match]
 Name=enp2s0
 
 [Network]
+DHCPPrefixDelegation=yes
 IPv6SendRA=yes
-DHCPPrefixDelegation=yes</programlisting>
+
+# It is expected that the host is acting as a router. So, usually it is not
+# necessary to receive Router Advertisement from other hosts in the downstream network.
+IPv6AcceptRA=no
+
+[DHCPPrefixDelegation]
+UplinkInterface=enp1s0
+SubnetId=1
+Announce=yes</programlisting>
 
       <para>This will enable DHCPv6-PD on the interface enp1s0 as an upstream interface where the
       DHCPv6 client is running and enp2s0 as a downstream interface where the prefix is delegated to.
+      The delegated prefixes are distributed by IPv6 Router Advertisement on the downstream network.
+      </para>
+    </example>
+
+    <example>
+      <title>IPv6 Prefix Delegation (DHCPv4 6RD)</title>
+
+      <programlisting># /etc/systemd/network/55-dhcpv4-6rd-upstream.network
+[Match]
+Name=enp1s0
+
+[Network]
+DHCP=ipv4
+
+# When DHCPv4-6RD is used, the upstream network does not support IPv6.
+# Hence, it is not necessary to wait for Router Advertisement, which is enabled by default.
+IPv6AcceptRA=no
+
+[DHCPv4]
+Use6RD=yes</programlisting>
+
+      <programlisting># /etc/systemd/network/55-dhcpv4-6rd-downstream.network
+[Match]
+Name=enp2s0
+
+[Network]
+DHCPPrefixDelegation=yes
+IPv6SendRA=yes
+
+# It is expected that the host is acting as a router. So, usually it is not
+# necessary to receive Router Advertisement from other hosts in the downstream network.
+IPv6AcceptRA=no
+
+[DHCPPrefixDelegation]
+UplinkInterface=enp1s0
+SubnetId=1
+Announce=yes</programlisting>
+
+      <para>This will enable DHCPv4-6RD on the interface enp1s0 as an upstream interface where the
+      DHCPv4 client is running and enp2s0 as a downstream interface where the prefix is delegated to.
       The delegated prefixes are distributed by IPv6 Router Advertisement on the downstream network.
       </para>
     </example>

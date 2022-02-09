@@ -988,7 +988,7 @@ else
         # Support 'versioned' clang/llvm-strip binaries, as seen on Debian/Ubuntu
         # (like clang-10/llvm-strip-10)
         if meson.is_cross_build() or cc.get_id() != 'clang' or cc.cmd_array()[0].contains('afl-clang') or cc.cmd_array()[0].contains('hfuzz-clang')
-                r = find_program('clang', required : bpf_framework_required)
+                r = find_program('clang', required : bpf_framework_required, version : '>= 10.0.0')
                 clang_found = r.found()
                 if clang_found
                         if meson.version().version_compare('>= 0.55')
@@ -1012,23 +1012,35 @@ else
                 clang_supports_bpf = false
         endif
 
-        if not meson.is_cross_build() and clang_found
-                llvm_strip_bin = run_command(clang, '--print-prog-name', 'llvm-strip',
-                                             check : true).stdout().strip()
-        else
-                llvm_strip_bin = 'llvm-strip'
-        endif
-        llvm_strip = find_program(llvm_strip_bin, required : bpf_framework_required)
-
         # Debian installs this in /usr/sbin/ which is not in $PATH.
         # We check for 'bpftool' first, honouring $PATH, and in /usr/sbin/ for Debian.
         # We use 'bpftool gen' subcommand, it was added by 985ead416df39d6fe8e89580cc1db6aa273e0175 (v5.6).
         bpftool = find_program('bpftool',
                                '/usr/sbin/bpftool',
-                               required : bpf_framework_required,
-                               version : '>= 5.6')
+                               required : false,
+                               version : '>= 5.13.0')
 
-        deps_found = clang_found and clang_supports_bpf and clang_supports_flags and llvm_strip.found() and bpftool.found()
+        if bpftool.found()
+                bpftool_strip = true
+        else
+                bpftool_strip = false
+                bpftool = find_program('bpftool',
+                                       '/usr/sbin/bpftool',
+                                       required : bpf_framework_required,
+                                       version : '>= 5.6.0')
+        endif
+
+        if not bpftool_strip
+                if not meson.is_cross_build() and clang_found
+                        llvm_strip_bin = run_command(clang, '--print-prog-name', 'llvm-strip',
+                                                     check : true).stdout().strip()
+                else
+                        llvm_strip_bin = 'llvm-strip'
+                endif
+                llvm_strip = find_program(llvm_strip_bin, required : bpf_framework_required, version : '>= 10.0.0')
+        endif
+
+        deps_found = clang_found and clang_supports_bpf and clang_supports_flags and (bpftool_strip or llvm_strip.found()) and bpftool.found()
 
         # Can build BPF program from source code in restricted C
         conf.set10('BPF_FRAMEWORK', deps_found)
@@ -3955,12 +3967,14 @@ run_target(
 alias_target('update-dbus-docs', update_dbus_docs)
 alias_target('update-man-rules', update_man_rules)
 
-custom_target(
-        'export-dbus-interfaces',
-        output : dbus_interfaces_dir_name,
-        install : dbus_interfaces_dir != 'no',
-        install_dir : dbus_interfaces_dir_parent,
-        command : [export_dbus_interfaces_py, '@OUTPUT@', dbus_programs])
+if not meson.is_cross_build()
+        custom_target(
+                'export-dbus-interfaces',
+                output : dbus_interfaces_dir_name,
+                install : dbus_interfaces_dir != 'no',
+                install_dir : dbus_interfaces_dir_parent,
+                command : [export_dbus_interfaces_py, '@OUTPUT@', dbus_programs])
+endif
 
 ############################################################
 

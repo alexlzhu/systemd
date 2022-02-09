@@ -105,11 +105,23 @@ tests += [
 ]
 
 fuzzers += [
+        [files('fuzz-dhcp-client.c'),
+         [libshared,
+          libsystemd_network]],
+
         [files('fuzz-dhcp6-client.c'),
          [libshared,
           libsystemd_network]],
 
+        [files('fuzz-dhcp6-client-send.c'),
+         [libshared,
+          libsystemd_network]],
+
         [files('fuzz-dhcp-server.c'),
+         [libsystemd_network,
+          libshared]],
+
+        [files('fuzz-dhcp-server-relay-message.c'),
          [libsystemd_network,
           libshared]],
 

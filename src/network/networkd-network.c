@@ -124,6 +124,7 @@ int network_verify(Network *network) {
         int r;
 
         assert(network);
+        assert(network->manager);
         assert(network->filename);
 
         if (net_match_is_empty(&network->match) && !network->conditions)
@@ -248,10 +249,11 @@ int network_verify(Network *network) {
         }
 
         if (network->dhcp_critical >= 0) {
-                if (network->keep_configuration >= 0)
-                        log_warning("%s: Both KeepConfiguration= and deprecated CriticalConnection= are set. "
-                                    "Ignoring CriticalConnection=.", network->filename);
-                else if (network->dhcp_critical)
+                if (network->keep_configuration >= 0) {
+                        if (network->manager->keep_configuration < 0)
+                                log_warning("%s: Both KeepConfiguration= and deprecated CriticalConnection= are set. "
+                                            "Ignoring CriticalConnection=.", network->filename);
+                } else if (network->dhcp_critical)
                         /* CriticalConnection=yes also preserve foreign static configurations. */
                         network->keep_configuration = KEEP_CONFIGURATION_YES;
                 else
@@ -386,7 +388,7 @@ int network_load_one(Manager *manager, OrderedHashmap **networks, const char *fi
                 .allmulticast = -1,
                 .promiscuous = -1,
 
-                .keep_configuration = _KEEP_CONFIGURATION_INVALID,
+                .keep_configuration = manager->keep_configuration,
 
                 .dhcp_duid.type = _DUID_TYPE_INVALID,
                 .dhcp_critical = -1,
@@ -435,6 +437,7 @@ int network_load_one(Manager *manager, OrderedHashmap **networks, const char *fi
 
                 .use_bpdu = -1,
                 .hairpin = -1,
+                .isolated = -1,
                 .fast_leave = -1,
                 .allow_port_to_be_root = -1,
                 .unicast_flood = -1,
@@ -752,7 +755,7 @@ static Network *network_free(Network *network) {
         hashmap_free_with_destructor(network->rules_by_section, routing_policy_rule_free);
         hashmap_free_with_destructor(network->dhcp_static_leases_by_section, dhcp_static_lease_free);
         ordered_hashmap_free_with_destructor(network->sr_iov_by_section, sr_iov_free);
-        ordered_hashmap_free_with_destructor(network->tc_by_section, traffic_control_free);
+        hashmap_free_with_destructor(network->tc_by_section, traffic_control_free);
 
         free(network->name);
 

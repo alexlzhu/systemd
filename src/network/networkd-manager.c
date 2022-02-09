@@ -45,12 +45,14 @@
 #include "ordered-set.h"
 #include "path-lookup.h"
 #include "path-util.h"
+#include "qdisc.h"
 #include "selinux-util.h"
 #include "set.h"
 #include "signal-util.h"
 #include "stat-util.h"
 #include "strv.h"
 #include "sysctl-util.h"
+#include "tclass.h"
 #include "tmpfile-util.h"
 
 /* use 128 MB for receive socket kernel queue. */
@@ -311,6 +313,22 @@ static int manager_connect_rtnl(Manager *m) {
         if (r < 0)
                 return r;
 
+        r = netlink_add_match(m->rtnl, NULL, RTM_NEWQDISC, &manager_rtnl_process_qdisc, NULL, m, "network-rtnl_process_qdisc");
+        if (r < 0)
+                return r;
+
+        r = netlink_add_match(m->rtnl, NULL, RTM_DELQDISC, &manager_rtnl_process_qdisc, NULL, m, "network-rtnl_process_qdisc");
+        if (r < 0)
+                return r;
+
+        r = netlink_add_match(m->rtnl, NULL, RTM_NEWTCLASS, &manager_rtnl_process_tclass, NULL, m, "network-rtnl_process_tclass");
+        if (r < 0)
+                return r;
+
+        r = netlink_add_match(m->rtnl, NULL, RTM_DELTCLASS, &manager_rtnl_process_tclass, NULL, m, "network-rtnl_process_tclass");
+        if (r < 0)
+                return r;
+
         r = netlink_add_match(m->rtnl, NULL, RTM_NEWADDR, &manager_rtnl_process_address, NULL, m, "network-rtnl_process_address");
         if (r < 0)
                 return r;
@@ -398,6 +416,30 @@ static int signal_restart_callback(sd_event_source *s, const struct signalfd_sig
         return sd_event_exit(sd_event_source_get_event(s), 0);
 }
 
+static int manager_set_keep_configuration(Manager *m) {
+        int r;
+
+        assert(m);
+
+        if (in_initrd()) {
+                log_debug("Running in initrd, keep DHCPv4 addresses on stopping networkd by default.");
+                m->keep_configuration = KEEP_CONFIGURATION_DHCP_ON_STOP;
+                return 0;
+        }
+
+        r = path_is_network_fs("/");
+        if (r < 0)
+                return log_error_errno(r, "Failed to detect if root is network filesystem: %m");
+        if (r == 0) {
+                m->keep_configuration = _KEEP_CONFIGURATION_INVALID;
+                return 0;
+        }
+
+        log_debug("Running on network filesystem, enabling KeepConfiguration= by default.");
+        m->keep_configuration = KEEP_CONFIGURATION_YES;
+        return 0;
+}
+
 int manager_setup(Manager *m) {
         int r;
 
@@ -453,6 +495,10 @@ int manager_setup(Manager *m) {
         if (r < 0)
                 return r;
 
+        r = manager_set_keep_configuration(m);
+        if (r < 0)
+                return r;
+
         m->state_file = strdup("/run/systemd/netif/state");
         if (!m->state_file)
                 return -ENOMEM;
@@ -468,6 +514,7 @@ int manager_new(Manager **ret, bool test_mode) {
                 return -ENOMEM;
 
         *m = (Manager) {
+                .keep_configuration = _KEEP_CONFIGURATION_INVALID,
                 .test_mode = test_mode,
                 .speed_meter_interval_usec = SPEED_METER_DEFAULT_TIME_INTERVAL,
                 .online_state = _LINK_ONLINE_STATE_INVALID,
@@ -642,6 +689,34 @@ static int manager_enumerate_links(Manager *m) {
         return manager_enumerate_internal(m, m->rtnl, req, manager_rtnl_process_link);
 }
 
+static int manager_enumerate_qdisc(Manager *m) {
+        _cleanup_(sd_netlink_message_unrefp) sd_netlink_message *req = NULL;
+        int r;
+
+        assert(m);
+        assert(m->rtnl);
+
+        r = sd_rtnl_message_new_traffic_control(m->rtnl, &req, RTM_GETQDISC, 0, 0, 0);
+        if (r < 0)
+                return r;
+
+        return manager_enumerate_internal(m, m->rtnl, req, manager_rtnl_process_qdisc);
+}
+
+static int manager_enumerate_tclass(Manager *m) {
+        _cleanup_(sd_netlink_message_unrefp) sd_netlink_message *req = NULL;
+        int r;
+
+        assert(m);
+        assert(m->rtnl);
+
+        r = sd_rtnl_message_new_traffic_control(m->rtnl, &req, RTM_GETTCLASS, 0, 0, 0);
+        if (r < 0)
+                return r;
+
+        return manager_enumerate_internal(m, m->rtnl, req, manager_rtnl_process_tclass);
+}
+
 static int manager_enumerate_addresses(Manager *m) {
         _cleanup_(sd_netlink_message_unrefp) sd_netlink_message *req = NULL;
         int r;
@@ -767,6 +842,14 @@ int manager_enumerate(Manager *m) {
         r = manager_enumerate_links(m);
         if (r < 0)
                 return log_error_errno(r, "Could not enumerate links: %m");
+
+        r = manager_enumerate_qdisc(m);
+        if (r < 0)
+                return log_error_errno(r, "Could not enumerate QDisc: %m");
+
+        r = manager_enumerate_tclass(m);
+        if (r < 0)
+                return log_error_errno(r, "Could not enumerate TClass: %m");
 
         r = manager_enumerate_addresses(m);
         if (r < 0)

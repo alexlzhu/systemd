@@ -27,24 +27,19 @@
 #define xnew_alloc(type, n, alloc)                                           \
         ({                                                                   \
                 UINTN _alloc_size;                                           \
-                if (__builtin_mul_overflow(sizeof(type), (n), &_alloc_size)) \
-                        assert_not_reached();                                \
+                assert_se(!__builtin_mul_overflow(sizeof(type), (n), &_alloc_size)); \
                 (type *) alloc(_alloc_size);                                 \
         })
 
-#define xallocate_pool(size) ASSERT_PTR(AllocatePool(size))
-#define xallocate_zero_pool(size) ASSERT_PTR(AllocateZeroPool(size))
-#define xreallocate_pool(p, old_size, new_size) ASSERT_PTR(ReallocatePool((p), (old_size), (new_size)))
-#define xpool_print(fmt, ...) ((CHAR16 *) ASSERT_PTR(PoolPrint((fmt), ##__VA_ARGS__)))
-#define xstrdup(str) ((CHAR16 *) ASSERT_PTR(StrDuplicate(str)))
+#define xallocate_pool(size) ASSERT_SE_PTR(AllocatePool(size))
+#define xallocate_zero_pool(size) ASSERT_SE_PTR(AllocateZeroPool(size))
+#define xreallocate_pool(p, old_size, new_size) ASSERT_SE_PTR(ReallocatePool((p), (old_size), (new_size)))
+#define xpool_print(fmt, ...) ((CHAR16 *) ASSERT_SE_PTR(PoolPrint((fmt), ##__VA_ARGS__)))
+#define xstrdup(str) ((CHAR16 *) ASSERT_SE_PTR(StrDuplicate(str)))
 #define xnew(type, n) xnew_alloc(type, (n), xallocate_pool)
 #define xnew0(type, n) xnew_alloc(type, (n), xallocate_zero_pool)
 
 EFI_STATUS parse_boolean(const CHAR8 *v, BOOLEAN *b);
-
-UINT64 ticks_read(void);
-UINT64 ticks_freq(void);
-UINT64 time_usec(void);
 
 EFI_STATUS efivar_set(const EFI_GUID *vendor, const CHAR16 *name, const CHAR16 *value, UINT32 flags);
 EFI_STATUS efivar_set_raw(const EFI_GUID *vendor, const CHAR16 *name, const void *buf, UINTN size, UINT32 flags);

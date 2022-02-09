@@ -269,12 +269,10 @@ static Link *link_free(Link *link) {
         link_dns_settings_clear(link);
 
         link->routes = set_free(link->routes);
-
         link->nexthops = set_free(link->nexthops);
-
         link->neighbors = set_free(link->neighbors);
-
         link->addresses = set_free(link->addresses);
+        link->traffic_control = set_free(link->traffic_control);
 
         link->dhcp_pd_prefixes = set_free(link->dhcp_pd_prefixes);
 
@@ -429,6 +427,8 @@ int link_stop_engines(Link *link, bool may_keep_dhcp) {
         k = sd_ndisc_stop(link->ndisc);
         if (k < 0)
                 r = log_link_warning_errno(link, k, "Could not stop IPv6 Router Discovery: %m");
+
+        ndisc_flush(link);
 
         k = sd_radv_stop(link->radv);
         if (k < 0)
@@ -892,24 +892,6 @@ static int link_new_bound_to_list(Link *link) {
         return 0;
 }
 
-static int link_new_carrier_maps(Link *link) {
-        int r;
-
-        r = link_new_bound_by_list(link);
-        if (r < 0)
-                return r;
-
-        r = link_handle_bound_by_list(link);
-        if (r < 0)
-                return r;
-
-        r = link_new_bound_to_list(link);
-        if (r < 0)
-                return r;
-
-        return link_handle_bound_to_list(link);
-}
-
 static void link_free_bound_to_list(Link *link) {
         bool updated = false;
         Link *bound_to;
@@ -944,13 +926,6 @@ static void link_free_bound_by_list(Link *link) {
 
         if (updated)
                 link_dirty(link);
-}
-
-static void link_free_carrier_maps(Link *link) {
-        assert(link);
-
-        link_free_bound_to_list(link);
-        link_free_bound_by_list(link);
 }
 
 static int link_append_to_master(Link *link) {
@@ -1012,7 +987,8 @@ static Link *link_drop(Link *link) {
 
         link_drop_requests(link);
 
-        link_free_carrier_maps(link);
+        link_free_bound_to_list(link);
+        link_free_bound_by_list(link);
 
         link_drop_from_master(link);
 
@@ -1026,8 +1002,7 @@ static Link *link_drop(Link *link) {
         hashmap_remove(link->manager->links_by_name, link->ifname);
 
         /* bonding master and its slaves have the same hardware address. */
-        if (hashmap_get(link->manager->links_by_hw_addr, &link->hw_addr) == link)
-                hashmap_remove(link->manager->links_by_hw_addr, &link->hw_addr);
+        hashmap_remove_value(link->manager->links_by_hw_addr, &link->hw_addr, link);
 
         /* The following must be called at last. */
         assert_se(hashmap_remove(link->manager->links_by_index, INT_TO_PTR(link->ifindex)) == link);
@@ -1071,31 +1046,29 @@ static int link_drop_foreign_config(Link *link) {
         return r;
 }
 
-static int link_drop_config(Link *link) {
+static int link_drop_managed_config(Link *link) {
         int k, r;
 
         assert(link);
         assert(link->manager);
 
-        r = link_drop_routes(link);
+        r = link_drop_managed_routes(link);
 
-        k = link_drop_nexthops(link);
+        k = link_drop_managed_nexthops(link);
         if (k < 0 && r >= 0)
                 r = k;
 
-        k = link_drop_addresses(link);
+        k = link_drop_managed_addresses(link);
         if (k < 0 && r >= 0)
                 r = k;
 
-        k = link_drop_neighbors(link);
+        k = link_drop_managed_neighbors(link);
         if (k < 0 && r >= 0)
                 r = k;
 
-        k = link_drop_routing_policy_rules(link);
+        k = link_drop_managed_routing_policy_rules(link);
         if (k < 0 && r >= 0)
                 r = k;
-
-        ndisc_flush(link);
 
         return r;
 }
@@ -1120,7 +1093,11 @@ static int link_configure(Link *link) {
 
         link_set_state(link, LINK_STATE_CONFIGURING);
 
-        r = link_configure_traffic_control(link);
+        r = link_new_bound_to_list(link);
+        if (r < 0)
+                return r;
+
+        r = link_request_traffic_control(link);
         if (r < 0)
                 return r;
 
@@ -1201,7 +1178,7 @@ static int link_configure(Link *link) {
         if (r < 0)
                 return r;
 
-        r = ndisc_configure(link);
+        r = link_request_ndisc(link);
         if (r < 0)
                 return r;
 
@@ -1294,17 +1271,28 @@ static int link_reconfigure_impl(Link *link, bool force) {
 
         assert(link);
 
+        if (!IN_SET(link->state, LINK_STATE_INITIALIZED, LINK_STATE_CONFIGURING, LINK_STATE_CONFIGURED, LINK_STATE_UNMANAGED))
+                return 0;
+
         r = link_get_network(link, &network);
         if (r < 0 && r != -ENOENT)
                 return r;
 
+        if (link->state != LINK_STATE_UNMANAGED && !network)
+                /* If link is in initialized state, then link->network is also NULL. */
+                force = true;
+
         if (link->network == network && !force)
                 return 0;
 
-        if (network)
-                log_link_info(link, "Reconfiguring with %s.", network->filename);
-        else
-                log_link_info(link, "Unmanaging interface.");
+        if (network) {
+                if (link->state == LINK_STATE_INITIALIZED)
+                        log_link_info(link, "Configuring with %s.", network->filename);
+                else
+                        log_link_info(link, "Reconfiguring with %s.", network->filename);
+        } else
+                log_link_full(link, link->state == LINK_STATE_INITIALIZED ? LOG_DEBUG : LOG_INFO,
+                              "Unmanaging interface.");
 
         /* Dropping old .network file */
         r = link_stop_engines(link, false);
@@ -1319,12 +1307,19 @@ static int link_reconfigure_impl(Link *link, bool force) {
                  * link_drop_foreign_config() in link_configure(). */
                 link_foreignize_config(link);
         else {
-                r = link_drop_config(link);
+                /* Remove all managed configs. Note, foreign configs are removed in later by
+                 * link_configure() -> link_drop_foreign_config() if the link is managed by us. */
+                r = link_drop_managed_config(link);
                 if (r < 0)
                         return r;
         }
 
-        link_free_carrier_maps(link);
+        /* The bound_to map depends on .network file, hence it needs to be freed. But, do not free the
+         * bound_by map. Otherwise, if a link enters unmanaged state below, then its carrier state will
+         * not propagated to other interfaces anymore. Moreover, it is not necessary to recreate the
+         * map here, as it depends on .network files assigned to other links. */
+        link_free_bound_to_list(link);
+
         link_free_engines(link);
         link->network = network_unref(link->network);
 
@@ -1337,10 +1332,6 @@ static int link_reconfigure_impl(Link *link, bool force) {
         link->network = network_ref(network);
         link_update_operstate(link, true);
         link_dirty(link);
-
-        r = link_new_carrier_maps(link);
-        if (r < 0)
-                return r;
 
         link_set_state(link, LINK_STATE_INITIALIZED);
         link->activated = false;
@@ -1441,11 +1432,9 @@ int link_reconfigure_after_sleep(Link *link) {
 }
 
 static int link_initialized_and_synced(Link *link) {
-        Network *network;
         int r;
 
         assert(link);
-        assert(link->ifname);
         assert(link->manager);
 
         if (link->manager->test_mode) {
@@ -1454,7 +1443,7 @@ static int link_initialized_and_synced(Link *link) {
                 return 0;
         }
 
-        /* We may get called either from the asynchronous netlink callback,
+        /* This may get called either from the asynchronous netlink callback,
          * or directly from link_check_initialized() if running in a container. */
         if (!IN_SET(link->state, LINK_STATE_PENDING, LINK_STATE_INITIALIZED))
                 return 0;
@@ -1470,36 +1459,7 @@ static int link_initialized_and_synced(Link *link) {
         if (r < 0)
                 return r;
 
-        if (!link->network) {
-                r = link_get_network(link, &network);
-                if (r == -ENOENT) {
-                        link_set_state(link, LINK_STATE_UNMANAGED);
-                        return 0;
-                }
-                if (r < 0)
-                        return r;
-
-                if (link->flags & IFF_LOOPBACK) {
-                        if (network->link_local != ADDRESS_FAMILY_NO)
-                                log_link_debug(link, "Ignoring link-local autoconfiguration for loopback link");
-
-                        if (network->dhcp != ADDRESS_FAMILY_NO)
-                                log_link_debug(link, "Ignoring DHCP clients for loopback link");
-
-                        if (network->dhcp_server)
-                                log_link_debug(link, "Ignoring DHCP server for loopback link");
-                }
-
-                link->network = network_ref(network);
-                link_update_operstate(link, false);
-                link_dirty(link);
-        }
-
-        r = link_new_bound_to_list(link);
-        if (r < 0)
-                return r;
-
-        return link_configure(link);
+        return link_reconfigure_impl(link, /* force = */ false);
 }
 
 static int link_initialized_handler(sd_netlink *rtnl, sd_netlink_message *m, Link *link) {
@@ -1707,7 +1667,7 @@ static int link_carrier_lost_impl(Link *link) {
         if (r < 0)
                 ret = r;
 
-        r = link_drop_config(link);
+        r = link_drop_managed_config(link);
         if (r < 0 && ret >= 0)
                 ret = r;
 
@@ -1775,7 +1735,7 @@ static int link_admin_state_up(Link *link) {
                 return 0;
 
         if (link->activated && link->network->activation_policy == ACTIVATION_POLICY_ALWAYS_DOWN) {
-                log_link_info(link, "ActivationPolicy is \"always-off\", forcing link down.");
+                log_link_info(link, "Activation policy is \"always-down\", forcing link down.");
                 return link_request_to_bring_up_or_down(link, /* up = */ false);
         }
 
@@ -1795,7 +1755,7 @@ static int link_admin_state_down(Link *link) {
                 return 0;
 
         if (link->activated && link->network->activation_policy == ACTIVATION_POLICY_ALWAYS_UP) {
-                log_link_info(link, "ActivationPolicy is \"always-on\", forcing link up.");
+                log_link_info(link, "Activation policy is \"always-up\", forcing link up.");
                 return link_request_to_bring_up_or_down(link, /* up = */ true);
         }
 
@@ -2148,8 +2108,7 @@ static int link_update_hardware_address(Link *link, sd_netlink_message *message)
                 log_link_debug(link, "Hardware address is changed: %s → %s",
                                HW_ADDR_TO_STR(&link->hw_addr), HW_ADDR_TO_STR(&addr));
 
-                if (hashmap_get(link->manager->links_by_hw_addr, &link->hw_addr) == link)
-                        hashmap_remove(link->manager->links_by_hw_addr, &link->hw_addr);
+                hashmap_remove_value(link->manager->links_by_hw_addr, &link->hw_addr, link);
         }
 
         link->hw_addr = addr;

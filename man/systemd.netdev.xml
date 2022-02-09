@@ -629,7 +629,7 @@
           endpoint answers ARP requests from the local bridge on behalf
           of remote Distributed Overlay Virtual Ethernet
           <ulink url="https://en.wikipedia.org/wiki/Distributed_Overlay_Virtual_Ethernet">
-          (DVOE)</ulink> clients. Defaults to false.</para>
+          (DOVE)</ulink> clients. Defaults to false.</para>
         </listitem>
       </varlistentry>
       <varlistentry>
@@ -1149,6 +1149,15 @@
     the following keys:</para>
 
     <variablelist class='network-directives'>
+      <varlistentry>
+        <term><varname>External=</varname></term>
+        <listitem>
+          <para>Takes a boolean value. When true, then the tunnel is externally controlled, which is
+          also known as collect metadata mode, and most settings below like <varname>Local=</varname>
+          or <varname>Remote=</varname> are ignored. This implies <varname>Independent=</varname>.
+          Defaults to false.</para>
+        </listitem>
+      </varlistentry>
       <varlistentry>
         <term><varname>Local=</varname></term>
         <listitem>
@@ -1994,7 +2003,7 @@
         <term><varname>InterfaceId=</varname></term>
         <listitem>
           <para>Sets the ID/key of the xfrm interface which needs to be associated with a SA/policy.
-          Can be decimal or hexadecimal, valid range is 0-0xffffffff, defaults to 0.</para>
+          Can be decimal or hexadecimal, valid range is 1-0xffffffff. This is mandatory.</para>
         </listitem>
       </varlistentry>
       <varlistentry>

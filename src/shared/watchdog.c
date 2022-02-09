@@ -20,6 +20,20 @@ static char *watchdog_device;
 static usec_t watchdog_timeout; /* 0 → close device and USEC_INFINITY → don't change timeout */
 static usec_t watchdog_last_ping = USEC_INFINITY;
 
+/* Starting from kernel version 4.5, the maximum allowable watchdog timeout is
+ * UINT_MAX/1000U seconds (since internal calculations are done in milliseconds
+ * using unsigned integers. However, the kernel's userspace API for the watchdog
+ * uses signed integers for its ioctl parameters (even for timeout values and
+ * bit flags) so this is why we must consider the maximum signed integer value
+ * as well.
+ */
+#define WATCHDOG_TIMEOUT_MAX_SEC (CONST_MIN(UINT_MAX/1000U, (unsigned)INT_MAX))
+
+static int saturated_usec_to_sec(usec_t val) {
+        usec_t t = DIV_ROUND_UP(val, USEC_PER_SEC);
+        return MIN(t, (usec_t) WATCHDOG_TIMEOUT_MAX_SEC); /* Saturate to watchdog max */
+}
+
 static int watchdog_set_enable(bool enable) {
         int flags = enable ? WDIOS_ENABLECARD : WDIOS_DISABLECARD;
 
@@ -54,14 +68,12 @@ static int watchdog_get_timeout(void) {
 }
 
 static int watchdog_set_timeout(void) {
-        usec_t t;
         int sec;
 
         assert(watchdog_fd >= 0);
         assert(timestamp_is_set(watchdog_timeout));
 
-        t = DIV_ROUND_UP(watchdog_timeout, USEC_PER_SEC);
-        sec = MIN(t, (usec_t) INT_MAX); /* Saturate */
+        sec = saturated_usec_to_sec(watchdog_timeout);
 
         if (ioctl(watchdog_fd, WDIOC_SETTIMEOUT, &sec) < 0)
                 return -errno;
@@ -133,17 +145,21 @@ static int open_watchdog(void) {
         fn = !watchdog_device || path_equal(watchdog_device, "/dev/watchdog") ?
                 "/dev/watchdog0" : watchdog_device;
 
-        watchdog_fd = open(fn, O_WRONLY|O_CLOEXEC);
+        r = free_and_strdup(&watchdog_device, fn);
+        if (r < 0)
+                return log_oom_debug();
+
+        watchdog_fd = open(watchdog_device, O_WRONLY|O_CLOEXEC);
         if (watchdog_fd < 0)
-                return log_debug_errno(errno, "Failed to open watchdog device %s, ignoring: %m", fn);
+                return log_debug_errno(errno, "Failed to open watchdog device %s, ignoring: %m", watchdog_device);
 
         if (ioctl(watchdog_fd, WDIOC_GETSUPPORT, &ident) < 0)
-                log_debug_errno(errno, "Hardware watchdog %s does not support WDIOC_GETSUPPORT ioctl, ignoring: %m", fn);
+                log_debug_errno(errno, "Hardware watchdog %s does not support WDIOC_GETSUPPORT ioctl, ignoring: %m", watchdog_device);
         else
                 log_info("Using hardware watchdog '%s', version %x, device %s",
                          ident.identity,
                          ident.firmware_version,
-                         fn);
+                         watchdog_device);
 
         r = update_timeout();
         if (r < 0)

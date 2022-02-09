@@ -58,12 +58,21 @@ void network_adjust_dhcp_server(Network *network) {
                 ORDERED_HASHMAP_FOREACH(address, network->addresses_by_section) {
                         if (section_is_invalid(address->section))
                                 continue;
-                        if (address->family == AF_INET &&
-                            !in4_addr_is_localhost(&address->in_addr.in) &&
-                            in4_addr_is_null(&address->in_addr_peer.in)) {
-                                have = true;
-                                break;
-                        }
+
+                        if (address->family != AF_INET)
+                                continue;
+
+                        if (in4_addr_is_localhost(&address->in_addr.in))
+                                continue;
+
+                        if (in4_addr_is_link_local(&address->in_addr.in))
+                                continue;
+
+                        if (in4_addr_is_set(&address->in_addr_peer.in))
+                                continue;
+
+                        have = true;
+                        break;
                 }
                 if (!have) {
                         log_warning("%s: DHCPServer= is enabled, but no static address configured. "
@@ -129,6 +138,8 @@ static int link_find_dhcp_server_address(Link *link, Address **ret) {
                 if (address->family != AF_INET)
                         continue;
                 if (in4_addr_is_localhost(&address->in_addr.in))
+                        continue;
+                if (in4_addr_is_link_local(&address->in_addr.in))
                         continue;
                 if (in4_addr_is_set(&address->in_addr_peer.in))
                         continue;
@@ -391,12 +402,6 @@ static int dhcp4_server_configure(Link *link) {
         if (r < 0)
                 return log_link_error_errno(link, r, "Failed to configure address pool for DHCPv4 server instance: %m");
 
-        /* TODO:
-        r = sd_dhcp_server_set_router(link->dhcp_server, &main_address->in_addr.in);
-        if (r < 0)
-                return r;
-        */
-
         if (link->network->dhcp_server_max_lease_time_usec > 0) {
                 r = sd_dhcp_server_set_max_lease_time(link->dhcp_server,
                                                       DIV_ROUND_UP(link->network->dhcp_server_max_lease_time_usec, USEC_PER_SEC));
@@ -629,6 +634,12 @@ int config_parse_dhcp_server_emit(
         assert(emit);
         assert(rvalue);
 
+        if (isempty(rvalue)) {
+                emit->addresses = mfree(emit->addresses);
+                emit->n_addresses = 0;
+                return 0;
+        }
+
         for (const char *p = rvalue;;) {
                 _cleanup_free_ char *w = NULL;
                 union in_addr_union a;
@@ -645,18 +656,26 @@ int config_parse_dhcp_server_emit(
                 if (r == 0)
                         return 0;
 
-                r = in_addr_from_string(AF_INET, w, &a);
-                if (r < 0) {
-                        log_syntax(unit, LOG_WARNING, filename, line, r,
-                                   "Failed to parse %s= address '%s', ignoring: %m", lvalue, w);
-                        continue;
+                if (streq(w, "_server_address"))
+                        a = IN_ADDR_NULL; /* null address will be converted to the server address. */
+                else {
+                        r = in_addr_from_string(AF_INET, w, &a);
+                        if (r < 0) {
+                                log_syntax(unit, LOG_WARNING, filename, line, r,
+                                           "Failed to parse %s= address '%s', ignoring: %m", lvalue, w);
+                                continue;
+                        }
+
+                        if (in4_addr_is_null(&a.in)) {
+                                log_syntax(unit, LOG_WARNING, filename, line, 0,
+                                           "Found a null address in %s=, ignoring.", lvalue);
+                                continue;
+                        }
                 }
 
-                struct in_addr *m = reallocarray(emit->addresses, emit->n_addresses + 1, sizeof(struct in_addr));
-                if (!m)
+                if (!GREEDY_REALLOC(emit->addresses, emit->n_addresses + 1))
                         return log_oom();
 
-                emit->addresses = m;
                 emit->addresses[emit->n_addresses++] = a.in;
         }
 }

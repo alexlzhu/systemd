@@ -244,6 +244,7 @@ struct Network {
         /* Bridge Support */
         int use_bpdu;
         int hairpin;
+        int isolated;
         int fast_leave;
         int allow_port_to_be_root;
         int unicast_flood;
@@ -340,7 +341,7 @@ struct Network {
         Hashmap *route_prefixes_by_section;
         Hashmap *rules_by_section;
         Hashmap *dhcp_static_leases_by_section;
-        OrderedHashmap *tc_by_section;
+        Hashmap *tc_by_section;
         OrderedHashmap *sr_iov_by_section;
 
         /* All kinds of DNS configuration */

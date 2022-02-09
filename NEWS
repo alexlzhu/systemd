@@ -9,6 +9,22 @@ CHANGES WITH 251:
           can still be used by explicitly configuring RouteTable= setting in
           .netdev files.
 
+        * Services with Restart=always and a failing ExecCondition= will no longer
+          be restarted, to bring ExecCondition= in line with Condition*= settings.
+
+        * In v250 systemd-homed started making use of UID mapped mounts for the
+          home areas if the kernel and used file system support it. Files are
+          now internally owned by the "nobody" user (i.e. the user typically
+          used for indicating "this ownership is not mapped"), and dynamically
+          mapped to the UID used locally on the system via the UID mapping
+          mount logic of recent kernels.
+          In the current implementation systemd-homed only maps a limited
+          number of UIDs and GIDs making it impossible to run unprivileged
+          containers that want to map a full POSIX compliant UID and GID range
+          with their rootfs located within the systemd-homed managed home area.
+          This will be fixed in subsequent releases. See
+          https://github.com/systemd/systemd/pull/22239 for a proposal.
+
 CHANGES WITH 250:
 
         * Support for encrypted and authenticated credentials has been added.
@@ -154,7 +170,7 @@ CHANGES WITH 250:
           ProtectKernelLogs=yes can now be used.
 
         * The default maximum numbers of inodes have been raised from 64k to 1M
-          for /dev, and from 400k to 1M for /tmp.
+          for /dev/, and from 400k to 1M for /tmp/.
 
         * The per-user service manager learnt support for communicating with
           systemd-oomd to acquire OOM kill information.
@@ -310,7 +326,7 @@ CHANGES WITH 250:
           non-essential output. It's honored by the "dot", "syscall-filter",
           "filesystems" commands.
 
-        * systemd-analyze security gained a --profile option that can be used
+        * systemd-analyze security gained a --profile= option that can be used
           to take into account a portable profile when analyzing portable
           services, since a lot of the security-related settings are enabled
           through them.
