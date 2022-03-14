@@ -85,6 +85,7 @@
       <xi:include href="systemd.link.xml" xpointer="path" />
       <xi:include href="systemd.link.xml" xpointer="driver" />
       <xi:include href="systemd.link.xml" xpointer="type" />
+      <xi:include href="systemd.link.xml" xpointer="kind" />
       <xi:include href="systemd.link.xml" xpointer="property" />
 
       <varlistentry>
@@ -823,12 +824,11 @@ Table=1234</programlisting></para>
       <varlistentry>
         <term><varname>DHCPPrefixDelegation=</varname></term>
         <listitem>
-          <para>Takes a boolean value. When enabled, requests subnet prefixes acquired by a DHCPv6
-          client, or by a DHCPv4 client through the 6RD option  configured on another link. By default,
-          an address within each delegated prefix will be assigned, and the prefixes will be announced
-          through IPv6 Router Advertisement when <varname>IPv6SendRA=</varname> is enabled. Such
-          default settings can be configured in the [DHCPPrefixDelegation] section. Defaults to
-          disabled.</para>
+          <para>Takes a boolean value. When enabled, requests subnet prefixes on another link via the DHCPv6
+          protocol or via the 6RD option in the DHCPv4 protocol. An address within each delegated prefix will
+          be assigned, and the prefixes will be announced through IPv6 Router Advertisement if
+          <varname>IPv6SendRA=</varname> is enabled. This behaviour can be configured in the
+          [DHCPPrefixDelegation] section. Defaults to disabled.</para>
         </listitem>
       </varlistentry>
 
@@ -869,7 +869,6 @@ Table=1234</programlisting></para>
         <term><varname>IPoIB=</varname></term>
         <term><varname>IPVLAN=</varname></term>
         <term><varname>IPVTAP=</varname></term>
-        <term><varname>L2TP=</varname></term>
         <term><varname>MACsec=</varname></term>
         <term><varname>MACVLAN=</varname></term>
         <term><varname>MACVTAP=</varname></term>
@@ -878,7 +877,7 @@ Table=1234</programlisting></para>
         <term><varname>VXLAN=</varname></term>
         <term><varname>Xfrm=</varname></term>
         <listitem>
-          <para>The name of an IPoIB, IPVLAN, IPVTAP, L2TP, MACsec, MACVLAN, MACVTAP, tunnel, VLAN,
+          <para>The name of an IPoIB, IPVLAN, IPVTAP, MACsec, MACVLAN, MACVTAP, tunnel, VLAN,
           VXLAN, or Xfrm to be created on the link. See
           <citerefentry><refentrytitle>systemd.netdev</refentrytitle><manvolnum>5</manvolnum></citerefentry>.
           This option may be specified more than once.</para>
@@ -2304,7 +2303,7 @@ Table=1234</programlisting></para>
                   <citerefentry><refentrytitle>sd-id128</refentrytitle><manvolnum>3</manvolnum></citerefentry>,
                   <citerefentry><refentrytitle>sd_id128_from_string</refentrytitle><manvolnum>3</manvolnum></citerefentry>,
                   and
-                  <citerefentry><refentrytitle>sd_id128_get_machine</refentrytitle><manvolnum>3</manvolnum></citerefentry>,
+                  <citerefentry><refentrytitle>sd_id128_get_machine</refentrytitle><manvolnum>3</manvolnum></citerefentry>.
                 </para>
                 <para>
                   Note that the <literal>prefixstable</literal> algorithm uses both the interface
@@ -2624,6 +2623,42 @@ Token=prefixstable:2002:da8:1::</programlisting></para>
         timezone is set, the system timezone of the local host is
         propagated, as determined by the
         <filename>/etc/localtime</filename> symlink.</para></listitem>
+      </varlistentry>
+
+      <varlistentry>
+        <term><varname>BootServerAddress=</varname></term>
+
+        <listitem>
+          <para>Takes an IPv4 address of the boot server used by e.g. PXE boot systems. When specified,
+          the address is set to the <literal>siaddr</literal> field of the DHCP message header. See
+          <ulink url="https://www.rfc-editor.org/rfc/rfc2131.html">RFC 2131</ulink> for more details.
+          Defaults to unset.</para>
+        </listitem>
+      </varlistentry>
+
+      <varlistentry>
+        <term><varname>BootServerName=</varname></term>
+
+        <listitem>
+          <para>Takes a name of the boot server used by e.g. PXE boot systems. When specified, the
+          server name is set to the DHCP option 66. See
+          <ulink url="https://www.rfc-editor.org/rfc/rfc2132.html">RFC 2132</ulink> for more details.
+          Defaults to unset.</para>
+          <para>Note that typically one of
+          <varname>BootServerName=</varname>/<varname>BootServerAddress=</varname> is sufficient to be
+          set, but both can be set too, if desired.</para>
+        </listitem>
+      </varlistentry>
+
+      <varlistentry>
+        <term><varname>BootFilename=</varname></term>
+
+        <listitem>
+          <para>Takes a path or URL to a file loaded by e.g. a PXE boot loader. The specified path is
+          set to the DHCP option 67. See
+          <ulink url="https://www.rfc-editor.org/rfc/rfc2132.html">RFC 2132</ulink> for more details.
+          Defaults to unset.</para>
+        </listitem>
       </varlistentry>
 
       <varlistentry>
@@ -3685,7 +3720,7 @@ Token=prefixstable:2002:da8:1::</programlisting></para>
               <term><option>dst-host</option></term>
               <listitem><para>
                 Flows are defined only by destination address. Equivalent to the
-                <literal>srchost</literal> option for <command>tc qdisc</command> command. See also
+                <literal>dsthost</literal> option for <command>tc qdisc</command> command. See also
                 <citerefentry project='man-pages'><refentrytitle>tc-cake</refentrytitle><manvolnum>8</manvolnum></citerefentry>.
               </para></listitem>
             </varlistentry>

@@ -4,7 +4,7 @@ project('systemd', 'c',
         version : '250',
         license : 'LGPLv2+',
         default_options: [
-                'c_std=gnu99',
+                'c_std=gnu11',
                 'prefix=/usr',
                 'sysconfdir=/etc',
                 'localstatedir=/var',
@@ -40,7 +40,7 @@ if want_ossfuzz and want_libfuzzer
         error('only one of oss-fuzz or llvm-fuzz can be specified')
 endif
 
-skip_deps = want_ossfuzz
+skip_deps = want_ossfuzz or get_option('skip-deps')
 fuzzer_build = want_ossfuzz or want_libfuzzer
 
 # Create a title-less summary section early, so it ends up first in the output.
@@ -361,7 +361,7 @@ possible_common_cc_flags = [
         '-Wno-string-plus-int',  # clang
 ]
 
-# Disable -Wmaybe-unitialized when compiling with -Os/-O1/-O3/etc. There are
+# Disable -Wmaybe-uninitialized when compiling with -Os/-O1/-O3/etc. There are
 # too many false positives with gcc >= 8. Effectively, we only test with -O0
 # and -O2; this should be enough to catch most important cases without too much
 # busywork. See https://github.com/systemd/systemd/pull/19226.
@@ -1052,7 +1052,7 @@ libmount = dependency('mount',
 want_libfdisk = get_option('fdisk')
 if want_libfdisk != 'false' and not skip_deps
         libfdisk = dependency('fdisk',
-                              version : '>= 2.33',
+                              version : '>= 2.32',
                               required : want_libfdisk == 'true')
         have = libfdisk.found()
 else

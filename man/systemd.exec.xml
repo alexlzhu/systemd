@@ -143,9 +143,7 @@
           <title>Mounting logging sockets into root environment</title>
 
           <programlisting>BindReadOnlyPaths=/dev/log /run/systemd/journal/socket /run/systemd/journal/stdout</programlisting>
-        </example>
-
-        <xi:include href="system-only.xml" xpointer="singular"/></listitem>
+        </example></listitem>
       </varlistentry>
 
       <varlistentry>
@@ -276,9 +274,7 @@
 
         <para>In order to allow propagating mounts at runtime in a safe manner, <filename>/run/systemd/propagate</filename>
         on the host will be used to set up new mounts, and <filename>/run/host/incoming/</filename> in the private namespace
-        will be used as an intermediate step to store them before being moved to the final mount point.</para>
-
-        <xi:include href="system-only.xml" xpointer="singular"/></listitem>
+        will be used as an intermediate step to store them before being moved to the final mount point.</para></listitem>
       </varlistentry>
 
       <varlistentry>
@@ -364,9 +360,7 @@
         <varname>InaccessiblePaths=</varname>, or under <filename>/home/</filename> and other protected
         directories if <varname>ProtectHome=yes</varname> is
         specified. <varname>TemporaryFileSystem=</varname> with <literal>:ro</literal> or
-        <varname>ProtectHome=tmpfs</varname> should be used instead.</para>
-
-        <xi:include href="system-only.xml" xpointer="singular"/></listitem>
+        <varname>ProtectHome=tmpfs</varname> should be used instead.</para></listitem>
       </varlistentry>
 
       <varlistentry>
@@ -485,7 +479,8 @@
         or the host. See:
         <citerefentry><refentrytitle>os-release</refentrytitle><manvolnum>5</manvolnum></citerefentry>.</para>
 
-        <xi:include href="system-only.xml" xpointer="singular"/></listitem>
+        <para>Note that usage from user units requires overlayfs support in unprivileged user namespaces,
+        which was first introduced in kernel v5.11.</para></listitem>
       </varlistentry>
     </variablelist>
   </refsect1>
@@ -1964,9 +1959,7 @@ RestrictFileSystems=ext4</programlisting>
               </row>
               <row>
                 <entry>@known</entry>
-                <entry>All known filesystems defined by the kernel. This list is defined statically in systemd based on a kernel
-                version that was available when this systemd version was released. It will become progressively more
-                out-of-date as the kernel is updated.</entry>
+                <entry>All known filesystems defined by the kernel. This list is defined statically in systemd based on a kernel version that was available when this systemd version was released. It will become progressively more out-of-date as the kernel is updated.</entry>
               </row>
             </tbody>
           </tgroup>
@@ -3412,7 +3405,7 @@ StandardInputData=SWNrIHNpdHplIGRhIHVuJyBlc3NlIEtsb3BzLAp1ZmYgZWVtYWwga2xvcHAncy
         <varlistentry>
           <term><varname>$SERVICE_RESULT</varname></term>
 
-          <listitem><para>Only defined for the service unit type, this environment variable is passed to all
+          <listitem><para>Only used for the service unit type. This environment variable is passed to all
           <varname>ExecStop=</varname> and <varname>ExecStopPost=</varname> processes, and encodes the service
           "result". Currently, the following values are defined:</para>
 
@@ -3480,7 +3473,7 @@ StandardInputData=SWNrIHNpdHplIGRhIHVuJyBlc3NlIEtsb3BzLAp1ZmYgZWVtYWwga2xvcHAncy
           <term><varname>$EXIT_CODE</varname></term>
           <term><varname>$EXIT_STATUS</varname></term>
 
-          <listitem><para>Only defined for the service unit type, these environment variables are passed to all
+          <listitem><para>Only defined for the service unit type. These environment variables are passed to all
           <varname>ExecStop=</varname>, <varname>ExecStopPost=</varname> processes and contain exit status/code
           information of the main process of the service. For the precise definition of the exit code and status, see
           <citerefentry><refentrytitle>wait</refentrytitle><manvolnum>2</manvolnum></citerefentry>. <varname>$EXIT_CODE</varname>
@@ -3593,38 +3586,28 @@ StandardInputData=SWNrIHNpdHplIGRhIHVuJyBlc3NlIEtsb3BzLAp1ZmYgZWVtYWwga2xvcHAncy
         </varlistentry>
 
         <varlistentry>
-          <term><varname>$MONITOR_METADATA</varname></term>
+          <term><varname>$MONITOR_SERVICE_RESULT</varname></term>
+          <term><varname>$MONITOR_EXIT_CODE</varname></term>
+          <term><varname>$MONITOR_EXIT_STATUS</varname></term>
+          <term><varname>$MONITOR_INVOCATION_ID</varname></term>
+          <term><varname>$MONITOR_UNIT</varname></term>
 
-          <listitem><para>Only defined for the service unit type, this environment variable is passed to all
-          <varname>ExecStart=</varname> and <varname>ExecStartPre=</varname> processes which run in services
-          triggered by <varname>OnFailure=</varname> or <varname>OnSuccess=</varname> dependencies.</para>
-
-          <para>
-          The contents of this variable consists of a semi-colon separated list of metadata fields associated with the triggering
-          service. For each service which triggered the <varname>OnFailure=</varname> or <varname>OnSuccess=</varname>
-          dependency the following fields will be set:
+          <listitem><para>Only defined for the service unit type. Those environment variable are passed to
+          all <varname>ExecStart=</varname> and <varname>ExecStartPre=</varname> processes which run in
+          services triggered by <varname>OnFailure=</varname> or <varname>OnSuccess=</varname> dependencies.
           </para>
 
-          <itemizedlist>
-            <listitem><para><constant>SERVICE_RESULT</constant></para></listitem>
-            <listitem><para><constant>EXIT_CODE</constant></para></listitem>
-            <listitem><para><constant>EXIT_STATUS</constant></para></listitem>
-            <listitem><para><constant>INVOCATION_ID</constant></para></listitem>
-            <listitem><para><constant>UNIT</constant></para></listitem>
-          </itemizedlist>
+          <para>Variables <varname>$MONITOR_SERVICE_RESULT</varname>, <varname>$MONITOR_EXIT_CODE</varname>
+          and <varname>$MONITOR_EXIT_STATUS</varname> take the same values as for
+          <varname>ExecStop=</varname> and <varname>ExecStopPost=</varname> processes. Variables
+          <varname>$MONITOR_INVOCATION_ID</varname> and <varname>$MONITOR_UNIT</varname> are set to the
+          invocaton id and unit name of the service which triggered the dependency.</para>
 
-          <para>The fields <constant>SERVICE_RESULT</constant>, <constant>EXIT_CODE</constant> and
-          <constant>EXIT_STATUS</constant> may take the same values that are allowed when set for
-          <varname>ExecStop=</varname> and <varname>ExecStopPost=</varname> processes. The fields
-          <constant>INVOCATION_ID</constant> and <constant>UNIT</constant> are the invocaton id and unit
-          name of the service which triggered the dependency. Each field is comma separated, i.e.</para>
-
-          <programlisting>
-SERVICE_RESULT=result-string,EXIT_CODE=exit-code,EXIT_STATUS=exit-status,INVOCATION_ID=invocation-id,UNIT=triggering.service
-          </programlisting>
-
-          </listitem>
-
+          <para>Note that when multiple services trigger the same unit, those variables will be
+          <emphasis>not</emphasis> be passed. Consider using a template handler unit for that case instead:
+          <literal>OnFailure=<replaceable>handler</replaceable>@%n.service</literal> for non-templated units,
+          or <literal>OnFailure=<replaceable>handler</replaceable>@%p-%i.service</literal> for templated
+          units.</para></listitem>
         </varlistentry>
 
         <varlistentry>
@@ -4068,7 +4051,7 @@ SERVICE_RESULT=result-string,EXIT_CODE=exit-code,EXIT_STATUS=exit-status,INVOCAT
     <title>Examples</title>
 
       <example>
-        <title><varname>$MONITOR_METADATA</varname> usage</title>
+        <title><varname>$MONITOR_<replaceable>*</replaceable></varname> usage</title>
 
         <para>A service <filename index="false">myfailer.service</filename> which can trigger an
         <varname>OnFailure=</varname> dependency.</para>
@@ -4102,33 +4085,31 @@ ExecStart=/bin/mysecondprogram
 Description=Acts on service failing or succeeding
 
 [Service]
-ExecStart=/bin/bash -c "echo $MONITOR_METADATA"
+ExecStart=/bin/bash -c "echo $MONITOR_SERVICE_RESULT $MONITOR_EXIT_CODE $MONITOR_EXIT_STATUS $MONITOR_INVOCATION_ID $MONITOR_UNIT"
         </programlisting>
 
         <para>If <filename index="false">myfailer.service</filename> were to run and exit in failure,
         then <filename index="false">myhandler.service</filename> would be triggered and the
-        <varname>$MONITOR_METADATA</varname> variable would be set as follows:</para>
+        monitor variables would be set as follows:</para>
 
         <programlisting>
-MONITOR_METADATA=SERVICE_RESULT=result-string,EXIT_CODE=exit-code,EXIT_STATUS=exit-status,INVOCATION_ID=invocation-id,UNIT=myfailer.service
+MONITOR_SERVICE_RESULT=exit-code
+MONITOR_EXIT_CODE=exited
+MONITOR_EXIT_STATUS=1
+MONITOR_INVOCATION_ID=cc8fdc149b2b4ca698d4f259f4054236
+MONITOR_UNIT=myfailer.service
         </programlisting>
 
         <para>If <filename index="false">mysuccess.service</filename> were to run and exit in success,
         then <filename index="false">myhandler.service</filename> would be triggered and the
-        <varname>$MONITOR_METADATA</varname> variable would be set as follows:</para>
+        monitor variables would be set as follows:</para>
 
         <programlisting>
-MONITOR_METADATA=SERVICE_RESULT=result-string,EXIT_CODE=exit-code,EXIT_STATUS=exit-status,INVOCATION_ID=invocation-id,UNIT=mysuccess.service
-        </programlisting>
-
-        <para>If <filename index="false">myfailer.service</filename> and <filename index="false">mysuccess.service</filename> were to run and exit,
-        there is a chance that the triggered dependency start job might be merged. Thus only a single invocation of
-        <filename index="false">myhandler.service</filename> would be triggered. In this case the <varname>$MONITOR_METADATA</varname> variable
-        would be a list containing exit metadata for both of <filename index="false">myfailer.service</filename>
-        and <filename index="false">mysuccess.service</filename>.</para>
-
-        <programlisting>
-MONITOR_METADATA=SERVICE_RESULT=result-string,EXIT_CODE=exit-code,EXIT_STATUS=exit-status,INVOCATION_ID=invocation-id,UNIT=myfailer.service;SERVICE_RESULT=result-string,EXIT_CODE=exit-code,EXIT_STATUS=exit-status,INVOCATION_ID=invocation-id,UNIT=mysuccess.service
+MONITOR_SERVICE_RESULT=success
+MONITOR_EXIT_CODE=exited
+MONITOR_EXIT_STATUS=0
+MONITOR_INVOCATION_ID=6ab9af147b8c4a3ebe36e7a5f8611697
+MONITOR_UNIT=mysuccess.service
         </programlisting>
 
     </example>

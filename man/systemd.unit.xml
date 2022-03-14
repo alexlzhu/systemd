@@ -126,13 +126,11 @@
     <literal>@</literal> and the unit type suffix. In the unit file itself, the instance parameter may be
     referred to using <literal>%i</literal> and other specifiers, see below.</para>
 
-    <para>Unit files may contain additional options on top of those
-    listed here. If systemd encounters an unknown option, it will
-    write a warning log message but continue loading the unit. If an
-    option or section name is prefixed with <option>X-</option>, it is
-    ignored completely by systemd. Options within an ignored section
-    do not need the prefix. Applications may use this to include
-    additional information in the unit files.</para>
+    <para>Unit files may contain additional options on top of those listed here. If systemd encounters an
+    unknown option, it will write a warning log message but continue loading the unit. If an option or
+    section name is prefixed with <option>X-</option>, it is ignored completely by systemd. Options within an
+    ignored section do not need the prefix. Applications may use this to include additional information in
+    the unit files. To access those options, applications need to parse the unit files on their own.</para>
 
     <para>Units can be aliased (have an alternative name), by creating a symlink from the new name to the
     existing name in one of the unit search paths. For example, <filename>systemd-networkd.service</filename>
@@ -1894,9 +1892,9 @@
         <para><command>WantedBy=foo.service</command> in a service
         <filename>bar.service</filename> is mostly equivalent to
         <command>Alias=foo.service.wants/bar.service</command> in the
-        same file. In case of template units, <command>systemctl
-        enable</command> must be called with an instance name, and
-        this instance will be added to the
+        same file. In case of template units listing non template units,
+        <command>systemctl enable</command> must be called with an
+        instance name, and this instance will be added to the
         <filename>.wants/</filename> or
         <filename>.requires/</filename> list of the listed unit. E.g.
         <command>WantedBy=getty.target</command> in a service
@@ -2033,6 +2031,8 @@ Note that this setting is <emphasis>not</emphasis> influenced by the <varname>Us
           </row>
           <row>
             <entry><literal>%l</literal></entry>
+            <!-- We do not use the common definition from standard-specifiers.xml here since we want a
+                 slightly more verbose explanation here, referring to the reload cycle. -->
             <entry>Short host name</entry>
             <entry>The hostname of the running system at the point in time the unit configuration is loaded, truncated at the first dot to remove any domain component.</entry>
           </row>
@@ -2063,6 +2063,13 @@ Note that this setting is <emphasis>not</emphasis> influenced by the <varname>Us
             <entry><literal>%P</literal></entry>
             <entry>Unescaped prefix name</entry>
             <entry>Same as <literal>%p</literal>, but with escaping undone.</entry>
+          </row>
+          <row>
+            <!-- We do not use the common definition from standard-specifiers.xml here since we want a
+                 slightly more verbose explanation here, referring to the reload cycle. -->
+            <entry><literal>%R</literal></entry>
+            <entry>Pretty host name</entry>
+            <entry>The pretty hostname of the running system at the point in time the unit configuration is loaded, as read from the <varname>PRETTY_HOSTNAME=</varname> field of <filename>/etc/machine-info</filename>. If not set, resolves to the short hostname. See <citerefentry><refentrytitle>machine-info</refentrytitle><manvolnum>5</manvolnum></citerefentry> for more information.</entry>
           </row>
           <row>
             <entry><literal>%s</literal></entry>

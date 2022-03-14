@@ -59,7 +59,6 @@
 #include "networkd-sysctl.h"
 #include "set.h"
 #include "socket-util.h"
-#include "stat-util.h"
 #include "stdio-util.h"
 #include "string-table.h"
 #include "strv.h"
@@ -103,67 +102,6 @@ bool link_ipv4ll_enabled(Link *link) {
                 return false;
 
         return link->network->link_local & ADDRESS_FAMILY_IPV4;
-}
-
-bool link_ipv6ll_enabled(Link *link) {
-        assert(link);
-
-        if (!socket_ipv6_is_supported())
-                return false;
-
-        if (link->flags & IFF_LOOPBACK)
-                return false;
-
-        if (!link->network)
-                return false;
-
-        if (link->iftype == ARPHRD_CAN)
-                return false;
-
-        if (STRPTR_IN_SET(link->kind, "vrf", "wireguard", "ipip", "gre", "sit", "vti", "nlmon"))
-                return false;
-
-        if (link->network->bond)
-                return false;
-
-        return link->network->link_local & ADDRESS_FAMILY_IPV6;
-}
-
-bool link_may_have_ipv6ll(Link *link) {
-        assert(link);
-
-        /*
-         * This is equivalent to link_ipv6ll_enabled() for non-WireGuard interfaces.
-         *
-         * For WireGuard interface, the kernel does not assign any IPv6LL addresses, but we can assign
-         * it manually. It is necessary to set an IPv6LL address manually to run NDisc or RADV on
-         * WireGuard interface. Note, also Multicast=yes must be set. See #17380.
-         *
-         * TODO: May be better to introduce GenerateIPv6LinkLocalAddress= setting, and use algorithms
-         *       used in networkd-address-generation.c
-         */
-
-        if (link_ipv6ll_enabled(link))
-                return true;
-
-        /* IPv6LL address can be manually assigned on WireGuard interface. */
-        if (streq_ptr(link->kind, "wireguard")) {
-                Address *a;
-
-                if (!link->network)
-                        return false;
-
-                ORDERED_HASHMAP_FOREACH(a, link->network->addresses_by_section) {
-                        if (a->family != AF_INET6)
-                                continue;
-                        if (in6_addr_is_set(&a->in_addr_peer.in6))
-                                continue;
-                        if (in6_addr_is_link_local(&a->in_addr.in6))
-                                return true;
-                }
-        }
-
-        return false;
 }
 
 bool link_ipv6_enabled(Link *link) {
@@ -272,7 +210,8 @@ static Link *link_free(Link *link) {
         link->nexthops = set_free(link->nexthops);
         link->neighbors = set_free(link->neighbors);
         link->addresses = set_free(link->addresses);
-        link->traffic_control = set_free(link->traffic_control);
+        link->qdiscs = set_free(link->qdiscs);
+        link->tclasses = set_free(link->tclasses);
 
         link->dhcp_pd_prefixes = set_free(link->dhcp_pd_prefixes);
 
@@ -290,6 +229,7 @@ static Link *link_free(Link *link) {
         unlink_and_free(link->state_file);
 
         sd_device_unref(link->sd_device);
+        netdev_unref(link->netdev);
 
         hashmap_free(link->bound_to_links);
         hashmap_free(link->bound_by_links);
@@ -623,7 +563,6 @@ static int link_request_stacked_netdevs(Link *link) {
         assert(link);
 
         link->stacked_netdevs_created = false;
-        link->stacked_netdevs_after_configured_created = false;
 
         HASHMAP_FOREACH(netdev, link->network->stacked_netdevs) {
                 r = link_request_stacked_netdev(link, netdev);
@@ -635,8 +574,6 @@ static int link_request_stacked_netdevs(Link *link) {
                 link->stacked_netdevs_created = true;
                 link_check_ready(link);
         }
-        if (link->create_stacked_netdev_after_configured_messages == 0)
-                link->stacked_netdevs_after_configured_created = true;
 
         return 0;
 }
@@ -969,7 +906,7 @@ static void link_drop_requests(Link *link) {
 
         ORDERED_SET_FOREACH(req, link->manager->request_queue)
                 if (req->link == link)
-                        request_drop(req);
+                        request_detach(link->manager, req);
 }
 
 static Link *link_drop(Link *link) {
@@ -1230,6 +1167,7 @@ static int link_get_network(Link *link, Network **ret) {
                                 &link->permanent_hw_addr,
                                 link->driver,
                                 link->iftype,
+                                link->kind,
                                 link->ifname,
                                 link->alternative_names,
                                 link->wlan_iftype,
@@ -1267,12 +1205,17 @@ static int link_get_network(Link *link, Network **ret) {
 
 static int link_reconfigure_impl(Link *link, bool force) {
         Network *network = NULL;
+        NetDev *netdev = NULL;
         int r;
 
         assert(link);
 
         if (!IN_SET(link->state, LINK_STATE_INITIALIZED, LINK_STATE_CONFIGURING, LINK_STATE_CONFIGURED, LINK_STATE_UNMANAGED))
                 return 0;
+
+        r = netdev_get(link->manager, link->ifname, &netdev);
+        if (r < 0 && r != -ENOENT)
+                return r;
 
         r = link_get_network(link, &network);
         if (r < 0 && r != -ENOENT)
@@ -1301,10 +1244,13 @@ static int link_reconfigure_impl(Link *link, bool force) {
 
         link_drop_requests(link);
 
-        if (network && !force)
+        if (network && !force && network->keep_configuration != KEEP_CONFIGURATION_YES)
                 /* When a new/updated .network file is assigned, first make all configs (addresses,
                  * routes, and so on) foreign, and then drop unnecessary configs later by
-                 * link_drop_foreign_config() in link_configure(). */
+                 * link_drop_foreign_config() in link_configure().
+                 * Note, when KeepConfiguration=yes, link_drop_foreign_config() does nothing. Hence,
+                 * here we need to drop the configs such as addresses, routes, and so on configured by
+                 * the previously assigned .network file. */
                 link_foreignize_config(link);
         else {
                 /* Remove all managed configs. Note, foreign configs are removed in later by
@@ -1322,6 +1268,9 @@ static int link_reconfigure_impl(Link *link, bool force) {
 
         link_free_engines(link);
         link->network = network_unref(link->network);
+
+        netdev_unref(link->netdev);
+        link->netdev = netdev_ref(netdev);
 
         if (!network) {
                 link_set_state(link, LINK_STATE_UNMANAGED);
@@ -1509,8 +1458,7 @@ static int link_check_initialized(Link *link) {
 
         assert(link);
 
-        if (path_is_read_only_fs("/sys") > 0)
-                /* no udev */
+        if (!udev_available())
                 return link_initialized_and_synced(link);
 
         /* udev should be around */
@@ -2082,6 +2030,85 @@ static int link_update_master(Link *link, sd_netlink_message *message) {
         return 0;
 }
 
+static int link_update_driver(Link *link, sd_netlink_message *message) {
+        int r;
+
+        assert(link);
+        assert(link->manager);
+        assert(message);
+
+        /* Driver is already read. Assuming the driver is never changed. */
+        if (link->driver)
+                return 0;
+
+        /* When udevd is running, read the driver after the interface is initialized by udevd.
+         * Otherwise, ethtool may not work correctly. See issue #22538.
+         * When udevd is not running, read the value when the interface is detected. */
+        if (link->state != (udev_available() ? LINK_STATE_INITIALIZED : LINK_STATE_PENDING))
+                return 0;
+
+        r = ethtool_get_driver(&link->manager->ethtool_fd, link->ifname, &link->driver);
+        if (r < 0) {
+                log_link_debug_errno(link, r, "Failed to get driver, continuing without: %m");
+                return 0;
+        }
+
+        log_link_debug(link, "Found driver: %s", strna(link->driver));
+
+        if (streq_ptr(link->driver, "dsa")) {
+                uint32_t dsa_master_ifindex = 0;
+
+                r = sd_netlink_message_read_u32(message, IFLA_LINK, &dsa_master_ifindex);
+                if (r < 0 && r != -ENODATA)
+                        return log_link_debug_errno(link, r, "rtnl: failed to read ifindex of the DSA master interface: %m");
+
+                if (dsa_master_ifindex > INT_MAX) {
+                        log_link_debug(link, "rtnl: received too large DSA master ifindex (%"PRIu32" > INT_MAX), ignoring.",
+                                       dsa_master_ifindex);
+                        dsa_master_ifindex = 0;
+                }
+
+                link->dsa_master_ifindex = (int) dsa_master_ifindex;
+        }
+
+        return 0;
+}
+
+static int link_update_permanent_hardware_address(Link *link, sd_netlink_message *message) {
+        int r;
+
+        assert(link);
+        assert(link->manager);
+        assert(message);
+
+        if (link->permanent_hw_addr.length > 0)
+                return 0;
+
+        /* When udevd is running, read the permanent hardware address after the interface is
+         * initialized by udevd. Otherwise, ethtool may not work correctly. See issue #22538.
+         * When udevd is not running, read the value when the interface is detected. */
+        if (link->state != (udev_available() ? LINK_STATE_INITIALIZED : LINK_STATE_PENDING))
+                return 0;
+
+        r = netlink_message_read_hw_addr(message, IFLA_PERM_ADDRESS, &link->permanent_hw_addr);
+        if (r < 0) {
+                if (r != -ENODATA)
+                        return log_link_debug_errno(link, r, "Failed to read IFLA_PERM_ADDRESS attribute: %m");
+
+                if (netlink_message_read_hw_addr(message, IFLA_ADDRESS, NULL) >= 0) {
+                        /* Fallback to ethtool, if the link has a hardware address. */
+                        r = ethtool_get_permanent_hw_addr(&link->manager->ethtool_fd, link->ifname, &link->permanent_hw_addr);
+                        if (r < 0)
+                                log_link_debug_errno(link, r, "Permanent hardware address not found, continuing without: %m");
+                }
+        }
+
+        if (link->permanent_hw_addr.length > 0)
+                log_link_debug(link, "Saved permanent hardware address: %s", HW_ADDR_TO_STR(&link->permanent_hw_addr));
+
+        return 0;
+}
+
 static int link_update_hardware_address(Link *link, sd_netlink_message *message) {
         struct hw_addr_data addr;
         int r;
@@ -2369,11 +2396,23 @@ static int link_update(Link *link, sd_netlink_message *message) {
         if (r < 0)
                 return r;
 
+        r = link_update_driver(link, message);
+        if (r < 0)
+                return r;
+
+        r = link_update_permanent_hardware_address(link, message);
+        if (r < 0)
+                return r;
+
         r = link_update_hardware_address(link, message);
         if (r < 0)
                 return r;
 
         r = link_update_master(link, message);
+        if (r < 0)
+                return r;
+
+        r = link_update_ipv6ll_addrgen_mode(link, message);
         if (r < 0)
                 return r;
 
@@ -2450,6 +2489,8 @@ static int link_new(Manager *manager, sd_netlink_message *message, Link **ret) {
                 .ifname = TAKE_PTR(ifname),
                 .kind = TAKE_PTR(kind),
 
+                .ipv6ll_address_gen_mode = _IPV6_LINK_LOCAL_ADDRESS_GEN_MODE_INVALID,
+
                 .state_file = TAKE_PTR(state_file),
                 .lease_file = TAKE_PTR(lease_file),
                 .lldp_file = TAKE_PTR(lldp_file),
@@ -2474,44 +2515,6 @@ static int link_new(Manager *manager, sd_netlink_message *message, Link **ret) {
 
         log_link_debug(link, "Saved new link: ifindex=%i, iftype=%s(%u), kind=%s",
                        link->ifindex, strna(arphrd_to_name(link->iftype)), link->iftype, strna(link->kind));
-
-        r = netlink_message_read_hw_addr(message, IFLA_PERM_ADDRESS, &link->permanent_hw_addr);
-        if (r < 0) {
-                if (r != -ENODATA)
-                        log_link_debug_errno(link, r, "Failed to read IFLA_PERM_ADDRESS attribute, ignoring: %m");
-
-                if (netlink_message_read_hw_addr(message, IFLA_ADDRESS, NULL) >= 0) {
-                        /* Fallback to ethtool, if the link has a hardware address. */
-                        r = ethtool_get_permanent_hw_addr(&manager->ethtool_fd, link->ifname, &link->permanent_hw_addr);
-                        if (r < 0)
-                                log_link_debug_errno(link, r, "Permanent hardware address not found, continuing without: %m");
-                }
-        }
-        if (link->permanent_hw_addr.length > 0)
-                log_link_debug(link, "Saved permanent hardware address: %s", HW_ADDR_TO_STR(&link->permanent_hw_addr));
-
-        r = ethtool_get_driver(&manager->ethtool_fd, link->ifname, &link->driver);
-        if (r < 0)
-                log_link_debug_errno(link, r, "Failed to get driver, continuing without: %m");
-        else
-                log_link_debug(link, "Found driver: %s", strna(link->driver));
-
-        if (streq_ptr(link->driver, "dsa")) {
-                uint32_t dsa_master_ifindex;
-
-                r = sd_netlink_message_read_u32(message, IFLA_LINK, &dsa_master_ifindex);
-                if (r < 0) {
-                        dsa_master_ifindex = 0;
-                        if (r != -ENODATA)
-                                log_link_warning_errno(link, r, "rtnl: failed to read ifindex of the DSA master interface, ignoring: %m");
-                } else if (dsa_master_ifindex > INT_MAX) {
-                        dsa_master_ifindex = 0;
-                        log_link_warning(link, "rtnl: received too large DSA master ifindex (%"PRIu32" > INT_MAX), ignoring.",
-                                         dsa_master_ifindex);
-                }
-
-                link->dsa_master_ifindex = (int) dsa_master_ifindex;
-        }
 
         *ret = TAKE_PTR(link);
         return 0;
@@ -2569,7 +2572,7 @@ int manager_rtnl_process_link(sd_netlink *rtnl, sd_netlink_message *message, Man
                         /* netdev exists, so make sure the ifindex matches */
                         r = netdev_set_ifindex(netdev, message);
                         if (r < 0) {
-                                log_warning_errno(r, "Could not process new link message for netdev, ignoring: %m");
+                                log_netdev_warning_errno(netdev, r, "Could not process new link message for netdev, ignoring: %m");
                                 return 0;
                         }
                 }
@@ -2584,32 +2587,30 @@ int manager_rtnl_process_link(sd_netlink *rtnl, sd_netlink_message *message, Man
 
                         r = link_update(link, message);
                         if (r < 0) {
-                                log_warning_errno(r, "Could not process link message: %m");
+                                log_link_warning_errno(link, r, "Could not process link message: %m");
                                 link_enter_failed(link);
                                 return 0;
                         }
 
                         r = link_check_initialized(link);
                         if (r < 0) {
-                                log_warning_errno(r, "Failed to check link is initialized: %m");
+                                log_link_warning_errno(link, r, "Failed to check link is initialized: %m");
                                 link_enter_failed(link);
                                 return 0;
                         }
                 } else {
                         r = link_update(link, message);
                         if (r < 0) {
-                                log_warning_errno(r, "Could not process link message: %m");
+                                log_link_warning_errno(link, r, "Could not process link message: %m");
                                 link_enter_failed(link);
                                 return 0;
                         }
                 }
-
                 break;
 
         case RTM_DELLINK:
                 link_drop(link);
                 netdev_drop(netdev);
-
                 break;
 
         default:

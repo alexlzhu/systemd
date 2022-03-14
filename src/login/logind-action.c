@@ -18,114 +18,107 @@
 #include "terminal-util.h"
 #include "user-util.h"
 
-static const ActionTableItem action_table[_HANDLE_ACTION_MAX] = {
+static const HandleActionData handle_action_data_table[_HANDLE_ACTION_MAX] = {
         [HANDLE_POWEROFF] = {
-                SPECIAL_POWEROFF_TARGET,
-                INHIBIT_SHUTDOWN,
-                "org.freedesktop.login1.power-off",
-                "org.freedesktop.login1.power-off-multiple-sessions",
-                "org.freedesktop.login1.power-off-ignore-inhibit",
-                _SLEEP_OPERATION_INVALID,
-                SD_MESSAGE_SHUTDOWN_STR,
-                "System is powering down",
-                "power-off",
-                },
+                .handle                          = HANDLE_POWEROFF,
+                .target                          = SPECIAL_POWEROFF_TARGET,
+                .inhibit_what                    = INHIBIT_SHUTDOWN,
+                .polkit_action                   = "org.freedesktop.login1.power-off",
+                .polkit_action_multiple_sessions = "org.freedesktop.login1.power-off-multiple-sessions",
+                .polkit_action_ignore_inhibit    = "org.freedesktop.login1.power-off-ignore-inhibit",
+                .sleep_operation                 = _SLEEP_OPERATION_INVALID,
+                .message_id                      = SD_MESSAGE_SHUTDOWN_STR,
+                .message                         = "System is powering down",
+                .log_message                     = "power-off",
+        },
         [HANDLE_REBOOT] = {
-                SPECIAL_REBOOT_TARGET,
-                INHIBIT_SHUTDOWN,
-                "org.freedesktop.login1.reboot",
-                "org.freedesktop.login1.reboot-multiple-sessions",
-                "org.freedesktop.login1.reboot-ignore-inhibit",
-                _SLEEP_OPERATION_INVALID,
-                SD_MESSAGE_SHUTDOWN_STR,
-                "System is rebooting",
-                "reboot",
-                },
-        [HANDLE_HALT]  = {
-                SPECIAL_HALT_TARGET,
-                INHIBIT_SHUTDOWN,
-                "org.freedesktop.login1.halt",
-                "org.freedesktop.login1.halt-multiple-sessions",
-                "org.freedesktop.login1.halt-ignore-inhibit",
-                _SLEEP_OPERATION_INVALID,
-                SD_MESSAGE_SHUTDOWN_STR,
-                "System is halting",
-                "halt",
-                },
-        [HANDLE_KEXEC]  = {
-                SPECIAL_KEXEC_TARGET,
-                INHIBIT_SHUTDOWN,
-                "org.freedesktop.login1.reboot",
-                "org.freedesktop.login1.reboot-multiple-sessions",
-                "org.freedesktop.login1.reboot-ignore-inhibit",
-                _SLEEP_OPERATION_INVALID,
-                SD_MESSAGE_SHUTDOWN_STR,
-                "System is rebooting with kexec",
-                "kexec",
-                },
-        [HANDLE_SUSPEND]  = {
-                SPECIAL_SUSPEND_TARGET,
-                INHIBIT_SLEEP,
-                "org.freedesktop.login1.suspend",
-                "org.freedesktop.login1.suspend-multiple-sessions",
-                "org.freedesktop.login1.suspend-ignore-inhibit",
-                SLEEP_SUSPEND,
-                },
-        [HANDLE_HIBERNATE]  = {
-                SPECIAL_HIBERNATE_TARGET,
-                INHIBIT_SLEEP,
-                "org.freedesktop.login1.hibernate",
-                "org.freedesktop.login1.hibernate-multiple-sessions",
-                "org.freedesktop.login1.hibernate-ignore-inhibit",
-                SLEEP_HIBERNATE,
-                },
-        [HANDLE_HYBRID_SLEEP]  = {
-                SPECIAL_HYBRID_SLEEP_TARGET,
-                INHIBIT_SLEEP,
-                "org.freedesktop.login1.hibernate",
-                "org.freedesktop.login1.hibernate-multiple-sessions",
-                "org.freedesktop.login1.hibernate-ignore-inhibit",
-                SLEEP_HYBRID_SLEEP,
-                },
-        [HANDLE_SUSPEND_THEN_HIBERNATE]  = {
-                SPECIAL_SUSPEND_THEN_HIBERNATE_TARGET,
-                INHIBIT_SLEEP,
-                "org.freedesktop.login1.hibernate",
-                "org.freedesktop.login1.hibernate-multiple-sessions",
-                "org.freedesktop.login1.hibernate-ignore-inhibit",
-                SLEEP_SUSPEND_THEN_HIBERNATE,
-                },
-        [HANDLE_FACTORY_RESET]  = {
-                SPECIAL_FACTORY_RESET_TARGET,
-                _INHIBIT_WHAT_INVALID,
-                NULL,
-                NULL,
-                NULL,
-                _SLEEP_OPERATION_INVALID,
-                SD_MESSAGE_FACTORY_RESET_STR,
-                "System is performing factory reset",
-                NULL
-                },
+                .handle                          = HANDLE_REBOOT,
+                .target                          = SPECIAL_REBOOT_TARGET,
+                .inhibit_what                    = INHIBIT_SHUTDOWN,
+                .polkit_action                   = "org.freedesktop.login1.reboot",
+                .polkit_action_multiple_sessions = "org.freedesktop.login1.reboot-multiple-sessions",
+                .polkit_action_ignore_inhibit    = "org.freedesktop.login1.reboot-ignore-inhibit",
+                .sleep_operation                 = _SLEEP_OPERATION_INVALID,
+                .message_id                      = SD_MESSAGE_SHUTDOWN_STR,
+                .message                         = "System is rebooting",
+                .log_message                     = "reboot",
+        },
+        [HANDLE_HALT] = {
+                .handle                          = HANDLE_HALT,
+                .target                          = SPECIAL_HALT_TARGET,
+                .inhibit_what                    = INHIBIT_SHUTDOWN,
+                .polkit_action                   = "org.freedesktop.login1.halt",
+                .polkit_action_multiple_sessions = "org.freedesktop.login1.halt-multiple-sessions",
+                .polkit_action_ignore_inhibit    = "org.freedesktop.login1.halt-ignore-inhibit",
+                .sleep_operation                 = _SLEEP_OPERATION_INVALID,
+                .message_id                      = SD_MESSAGE_SHUTDOWN_STR,
+                .message                         = "System is halting",
+                .log_message                     = "halt",
+        },
+        [HANDLE_KEXEC] = {
+                .handle                          = HANDLE_KEXEC,
+                .target                          = SPECIAL_KEXEC_TARGET,
+                .inhibit_what                    = INHIBIT_SHUTDOWN,
+                .polkit_action                   = "org.freedesktop.login1.reboot",
+                .polkit_action_multiple_sessions = "org.freedesktop.login1.reboot-multiple-sessions",
+                .polkit_action_ignore_inhibit    = "org.freedesktop.login1.reboot-ignore-inhibit",
+                .sleep_operation                 = _SLEEP_OPERATION_INVALID,
+                .message_id                      = SD_MESSAGE_SHUTDOWN_STR,
+                .message                         = "System is rebooting with kexec",
+                .log_message                     = "kexec",
+        },
+        [HANDLE_SUSPEND] = {
+                .handle                          = HANDLE_SUSPEND,
+                .target                          = SPECIAL_SUSPEND_TARGET,
+                .inhibit_what                    = INHIBIT_SLEEP,
+                .polkit_action                   = "org.freedesktop.login1.suspend",
+                .polkit_action_multiple_sessions = "org.freedesktop.login1.suspend-multiple-sessions",
+                .polkit_action_ignore_inhibit    = "org.freedesktop.login1.suspend-ignore-inhibit",
+                .sleep_operation                 = SLEEP_SUSPEND,
+        },
+        [HANDLE_HIBERNATE] = {
+                .handle                          = HANDLE_HIBERNATE,
+                .target                          = SPECIAL_HIBERNATE_TARGET,
+                .inhibit_what                    = INHIBIT_SLEEP,
+                .polkit_action                   = "org.freedesktop.login1.hibernate",
+                .polkit_action_multiple_sessions = "org.freedesktop.login1.hibernate-multiple-sessions",
+                .polkit_action_ignore_inhibit    = "org.freedesktop.login1.hibernate-ignore-inhibit",
+                .sleep_operation                 = SLEEP_HIBERNATE,
+        },
+        [HANDLE_HYBRID_SLEEP] = {
+                .handle                          = HANDLE_HYBRID_SLEEP,
+                .target                          = SPECIAL_HYBRID_SLEEP_TARGET,
+                .inhibit_what                    = INHIBIT_SLEEP,
+                .polkit_action                   = "org.freedesktop.login1.hibernate",
+                .polkit_action_multiple_sessions = "org.freedesktop.login1.hibernate-multiple-sessions",
+                .polkit_action_ignore_inhibit    = "org.freedesktop.login1.hibernate-ignore-inhibit",
+                .sleep_operation                 = SLEEP_HYBRID_SLEEP,
+        },
+        [HANDLE_SUSPEND_THEN_HIBERNATE] = {
+                .handle                          = HANDLE_SUSPEND_THEN_HIBERNATE,
+                .target                          = SPECIAL_SUSPEND_THEN_HIBERNATE_TARGET,
+                .inhibit_what                    = INHIBIT_SLEEP,
+                .polkit_action                   = "org.freedesktop.login1.hibernate",
+                .polkit_action_multiple_sessions = "org.freedesktop.login1.hibernate-multiple-sessions",
+                .polkit_action_ignore_inhibit    = "org.freedesktop.login1.hibernate-ignore-inhibit",
+                .sleep_operation                 = SLEEP_SUSPEND_THEN_HIBERNATE,
+        },
+        [HANDLE_FACTORY_RESET] = {
+                .handle                          = HANDLE_FACTORY_RESET,
+                .target                          = SPECIAL_FACTORY_RESET_TARGET,
+                .inhibit_what                    = _INHIBIT_WHAT_INVALID,
+                .sleep_operation                 = _SLEEP_OPERATION_INVALID,
+                .message_id                      = SD_MESSAGE_FACTORY_RESET_STR,
+                .message                         = "System is performing factory reset",
+        },
 };
 
-const char* manager_target_for_action(HandleAction handle) {
-        assert(handle >= 0);
-        assert(handle < (ssize_t) ELEMENTSOF(action_table));
+const HandleActionData* handle_action_lookup(HandleAction action) {
 
-        return action_table[handle].target;
-}
+        if (action < 0 || (size_t) action >= ELEMENTSOF(handle_action_data_table))
+                return NULL;
 
-const ActionTableItem* manager_item_for_handle(HandleAction handle) {
-        assert(handle >= 0);
-        assert(handle < (ssize_t) ELEMENTSOF(action_table));
-
-        return &action_table[handle];
-}
-
-HandleAction manager_handle_for_item(const ActionTableItem* a) {
-        if (a && a < action_table + ELEMENTSOF(action_table))
-                return a - action_table;
-        return _HANDLE_ACTION_INVALID;
+        return &handle_action_data_table[action];
 }
 
 int manager_handle_action(
@@ -226,7 +219,7 @@ int manager_handle_action(
                                        inhibit_what_to_string(m->delayed_action->inhibit_what),
                                        handle_action_to_string(handle));
 
-        inhibit_operation = manager_item_for_handle(handle)->inhibit_what;
+        inhibit_operation = handle_action_lookup(handle)->inhibit_what;
 
         /* If the actual operation is inhibited, warn and fail */
         if (!ignore_inhibited &&
@@ -249,7 +242,7 @@ int manager_handle_action(
 
         log_info("%s", message_table[handle]);
 
-        r = bus_manager_shutdown_or_sleep_now_or_later(m, manager_item_for_handle(handle), &error);
+        r = bus_manager_shutdown_or_sleep_now_or_later(m, handle_action_lookup(handle), &error);
         if (r < 0)
                 return log_error_errno(r, "Failed to execute %s operation: %s",
                                        handle_action_to_string(handle),

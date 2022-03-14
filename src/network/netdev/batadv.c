@@ -163,7 +163,7 @@ static int netdev_batadv_post_create_message(NetDev *netdev, sd_netlink_message 
         return 0;
 }
 
-static int netdev_batadv_post_create(NetDev *netdev, Link *link, sd_netlink_message *m) {
+static int netdev_batadv_post_create(NetDev *netdev, Link *link) {
         _cleanup_(sd_netlink_message_unrefp) sd_netlink_message *message = NULL;
         int r;
 
@@ -210,7 +210,7 @@ const NetDevVTable batadv_vtable = {
         .sections = NETDEV_COMMON_SECTIONS "BatmanAdvanced\0",
         .fill_message_create = netdev_batadv_fill_message_create,
         .post_create = netdev_batadv_post_create,
-        .create_type = NETDEV_CREATE_MASTER,
+        .create_type = NETDEV_CREATE_INDEPENDENT,
         .iftype = ARPHRD_ETHER,
         .generate_mac = true,
 };

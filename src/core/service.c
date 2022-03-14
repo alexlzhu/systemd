@@ -43,6 +43,8 @@
 #include "utf8.h"
 #include "util.h"
 
+#define service_spawn(...) service_spawn_internal(__func__, __VA_ARGS__)
+
 static const UnitActiveState state_translation_table[_SERVICE_STATE_MAX] = {
         [SERVICE_DEAD] = UNIT_INACTIVE,
         [SERVICE_CONDITION] = UNIT_ACTIVATING,
@@ -208,7 +210,7 @@ static void service_start_watchdog(Service *s) {
         assert(s);
 
         watchdog_usec = service_get_watchdog_usec(s);
-        if (IN_SET(watchdog_usec, 0, USEC_INFINITY)) {
+        if (!timestamp_is_set(watchdog_usec)) {
                 service_stop_watchdog(s);
                 return;
         }
@@ -279,7 +281,7 @@ static void service_extend_timeout(Service *s, usec_t extend_timeout_usec) {
 
         assert(s);
 
-        if (IN_SET(extend_timeout_usec, 0, USEC_INFINITY))
+        if (!timestamp_is_set(extend_timeout_usec))
                 return;
 
         extended = usec_add(now(CLOCK_MONOTONIC), extend_timeout_usec);
@@ -397,6 +399,8 @@ static void service_done(Unit *u) {
 
         s->timer_event_source = sd_event_source_disable_unref(s->timer_event_source);
         s->exec_fd_event_source = sd_event_source_disable_unref(s->exec_fd_event_source);
+
+        s->bus_name_pid_lookup_slot = sd_bus_slot_unref(s->bus_name_pid_lookup_slot);
 
         service_release_resources(u);
 }
@@ -709,17 +713,19 @@ static int service_setup_bus_name(Service *s) {
         assert(s);
 
         /* If s->bus_name is not set, then the unit will be refused by service_verify() later. */
-        if (s->type != SERVICE_DBUS || !s->bus_name)
+        if (!s->bus_name)
                 return 0;
 
-        r = unit_add_dependency_by_name(UNIT(s), UNIT_REQUIRES, SPECIAL_DBUS_SOCKET, true, UNIT_DEPENDENCY_FILE);
-        if (r < 0)
-                return log_unit_error_errno(UNIT(s), r, "Failed to add dependency on " SPECIAL_DBUS_SOCKET ": %m");
+        if (s->type == SERVICE_DBUS) {
+                r = unit_add_dependency_by_name(UNIT(s), UNIT_REQUIRES, SPECIAL_DBUS_SOCKET, true, UNIT_DEPENDENCY_FILE);
+                if (r < 0)
+                        return log_unit_error_errno(UNIT(s), r, "Failed to add dependency on " SPECIAL_DBUS_SOCKET ": %m");
 
-        /* We always want to be ordered against dbus.socket if both are in the transaction. */
-        r = unit_add_dependency_by_name(UNIT(s), UNIT_AFTER, SPECIAL_DBUS_SOCKET, true, UNIT_DEPENDENCY_FILE);
-        if (r < 0)
-                return log_unit_error_errno(UNIT(s), r, "Failed to add dependency on " SPECIAL_DBUS_SOCKET ": %m");
+                /* We always want to be ordered against dbus.socket if both are in the transaction. */
+                r = unit_add_dependency_by_name(UNIT(s), UNIT_AFTER, SPECIAL_DBUS_SOCKET, true, UNIT_DEPENDENCY_FILE);
+                if (r < 0)
+                        return log_unit_error_errno(UNIT(s), r, "Failed to add dependency on " SPECIAL_DBUS_SOCKET ": %m");
+        }
 
         r = unit_watch_bus_name(UNIT(s), s->bus_name);
         if (r == -EEXIST)
@@ -1443,84 +1449,40 @@ static bool service_exec_needs_notify_socket(Service *s, ExecFlags flags) {
         return s->notify_access != NOTIFY_NONE;
 }
 
-static int service_create_monitor_md_env(Job *j, char **ret) {
-        _cleanup_free_ char *var = NULL;
-        const char *list_delim = ";";
-        bool first = true;
-        Unit *tu;
+static Service *service_get_triggering_service(Service *s) {
+        Unit *candidate = NULL, *other;
 
-        assert(j);
-        assert(ret);
+        assert(s);
 
-        /* Create an environment variable 'MONITOR_METADATA', if creation is successful
-         * a pointer to it is returned via ret.
+        /* Return the service which triggered service 's', this means dependency
+         * types which include the UNIT_ATOM_ON_{FAILURE,SUCCESS}_OF atoms.
          *
-         * This variable contains a space separated set of fields which relate to
-         * the service(s) which triggered job 'j'. Job 'j' is the JOB_START job for
-         * an OnFailure= or OnSuccess= dependency. Format of the MONITOR_METADATA
-         * variable is as follows:
-         *
-         * MONITOR_METADATA="SERVICE_RESULT=<result-string0>,EXIT_CODE=<exit-code0>,EXIT_STATUS=<exit-status0>,
-         *                   INVOCATION_ID=<id>,UNIT=<triggering-unit0.service>;
-         *                   SERVICE_RESULT=<result-stringN>,EXIT_CODE=<exit-codeN>,EXIT_STATUS=<exit-statusN>,
-         *                   INVOCATION_ID=<id>,UNIT=<triggering-unitN.service>"
-         *
-         * Multiple results may be passed as in the above example if jobs are merged, i.e.
-         * some services a and b contain an OnFailure= or OnSuccess= dependency on the same
-         * service.
-         *
-         * For example:
-         *
-         * MONITOR_METADATA="SERVICE_RESULT=exit-code,EXIT_CODE=exited,EXIT_STATUS=1,INVOCATION_ID=02dd868af2f344b18edaf74b618b2f90,UNIT=failure.service;
-         *                   SERVICE_RESULT=exit-code,EXIT_CODE=exited,EXIT_STATUS=1,INVOCATION_ID=80cb228bd7344f77a090eda603a3cfe2,UNIT=failure2.service"
-         */
+         * N.B. if there are multiple services which could trigger 's' via OnFailure=
+         * or OnSuccess= then we return NULL. This is since we don't know from which
+         * one to propagate the exit status. */
 
-        LIST_FOREACH(triggered_by, tu, j->triggered_by) {
-                Service *env_source = SERVICE(tu);
-                int r;
-
-                if (!env_source)
-                        continue;
-
-                /* Add the environment variable name first. */
-                if (first && !strextend(&var, "MONITOR_METADATA="))
-                        return -ENOMEM;
-
-                if (!strextend(&var, !first ? list_delim : "", "SERVICE_RESULT=", service_result_to_string(env_source->result)))
-                        return -ENOMEM;
-
-                first = false;
-
-                if (env_source->main_exec_status.pid > 0 &&
-                    dual_timestamp_is_set(&env_source->main_exec_status.exit_timestamp)) {
-                        if (!strextend(&var, ",EXIT_CODE=", sigchld_code_to_string(env_source->main_exec_status.code)))
-                                return -ENOMEM;
-
-                        if (env_source->main_exec_status.code == CLD_EXITED) {
-                                r = strextendf(&var, ",EXIT_STATUS=%i",
-                                               env_source->main_exec_status.status);
-                                if (r < 0)
-                                        return r;
-                        } else if (!strextend(&var, ",EXIT_STATUS=", signal_to_string(env_source->main_exec_status.status)))
-                                return -ENOMEM;
-                }
-
-                if (!sd_id128_is_null(UNIT(env_source)->invocation_id)) {
-                        r = strextendf(&var, ",INVOCATION_ID=" SD_ID128_FORMAT_STR,
-                                       SD_ID128_FORMAT_VAL(UNIT(env_source)->invocation_id));
-                        if (r < 0)
-                                return r;
-                }
-
-                if (!strextend(&var, ",UNIT=", UNIT(env_source)->id))
-                        return -ENOMEM;
+        UNIT_FOREACH_DEPENDENCY(other, UNIT(s), UNIT_ATOM_ON_FAILURE_OF) {
+                if (candidate)
+                        goto have_other;
+                candidate = other;
         }
 
-        *ret = TAKE_PTR(var);
-        return 0;
+        UNIT_FOREACH_DEPENDENCY(other, UNIT(s), UNIT_ATOM_ON_SUCCESS_OF) {
+                if (candidate)
+                        goto have_other;
+                candidate = other;
+        }
+
+        return SERVICE(candidate);
+
+ have_other:
+        log_unit_warning(UNIT(s), "multiple trigger source candidates for exit status propagation (%s, %s), skipping.",
+                         candidate->id, other->id);
+        return NULL;
 }
 
-static int service_spawn(
+static int service_spawn_internal(
+                const char *caller,
                 Service *s,
                 ExecCommand *c,
                 usec_t timeout,
@@ -1540,9 +1502,12 @@ static int service_spawn(
         pid_t pid;
         int r;
 
+        assert(caller);
         assert(s);
         assert(c);
         assert(ret_pid);
+
+        log_unit_debug(UNIT(s), "Will spawn child (%s): %s", caller, c->path);
 
         r = unit_prepare_exec(UNIT(s)); /* This realizes the cgroup, among other things */
         if (r < 0)
@@ -1584,7 +1549,7 @@ static int service_spawn(
         if (r < 0)
                 return r;
 
-        our_env = new0(char*, 10);
+        our_env = new0(char*, 12);
         if (!our_env)
                 return -ENOMEM;
 
@@ -1641,30 +1606,44 @@ static int service_spawn(
                 }
         }
 
+        Service *env_source = NULL;
+        const char *monitor_prefix;
         if (flags & EXEC_SETENV_RESULT) {
-                if (asprintf(our_env + n_env++, "SERVICE_RESULT=%s", service_result_to_string(s->result)) < 0)
+                env_source = s;
+                monitor_prefix = "";
+        } else if (flags & EXEC_SETENV_MONITOR_RESULT) {
+                env_source = service_get_triggering_service(s);
+                monitor_prefix = "MONITOR_";
+        }
+
+        if (env_source) {
+                if (asprintf(our_env + n_env++, "%sSERVICE_RESULT=%s", monitor_prefix, service_result_to_string(env_source->result)) < 0)
                         return -ENOMEM;
 
-                if (s->main_exec_status.pid > 0 &&
-                    dual_timestamp_is_set(&s->main_exec_status.exit_timestamp)) {
-                        if (asprintf(our_env + n_env++, "EXIT_CODE=%s", sigchld_code_to_string(s->main_exec_status.code)) < 0)
+                if (env_source->main_exec_status.pid > 0 &&
+                    dual_timestamp_is_set(&env_source->main_exec_status.exit_timestamp)) {
+                        if (asprintf(our_env + n_env++, "%sEXIT_CODE=%s", monitor_prefix, sigchld_code_to_string(env_source->main_exec_status.code)) < 0)
                                 return -ENOMEM;
 
-                        if (s->main_exec_status.code == CLD_EXITED)
-                                r = asprintf(our_env + n_env++, "EXIT_STATUS=%i", s->main_exec_status.status);
+                        if (env_source->main_exec_status.code == CLD_EXITED)
+                                r = asprintf(our_env + n_env++, "%sEXIT_STATUS=%i", monitor_prefix, env_source->main_exec_status.status);
                         else
-                                r = asprintf(our_env + n_env++, "EXIT_STATUS=%s", signal_to_string(s->main_exec_status.status));
+                                r = asprintf(our_env + n_env++, "%sEXIT_STATUS=%s", monitor_prefix, signal_to_string(env_source->main_exec_status.status));
 
                         if (r < 0)
                                 return -ENOMEM;
                 }
 
-        } else if (flags & EXEC_SETENV_MONITOR_RESULT) {
-                Job *j = UNIT(s)->job;
-                if (j) {
-                        r = service_create_monitor_md_env(j, our_env + n_env++);
-                        if (r < 0)
-                                return r;
+                if (env_source != s) {
+                        if (!sd_id128_is_null(UNIT(env_source)->invocation_id)) {
+                                r = asprintf(our_env + n_env++, "%sINVOCATION_ID=" SD_ID128_FORMAT_STR,
+                                             monitor_prefix, SD_ID128_FORMAT_VAL(UNIT(env_source)->invocation_id));
+                                if (r < 0)
+                                        return -ENOMEM;
+                        }
+
+                        if (asprintf(our_env + n_env++, "%sUNIT=%s", monitor_prefix, UNIT(env_source)->id) < 0)
+                                return -ENOMEM;
                 }
         }
 
@@ -1677,7 +1656,7 @@ static int service_spawn(
                 return -ENOMEM;
 
         /* System D-Bus needs nss-systemd disabled, so that we don't deadlock */
-        SET_FLAG(exec_params.flags, EXEC_NSS_BYPASS_BUS,
+        SET_FLAG(exec_params.flags, EXEC_NSS_DYNAMIC_BYPASS,
                  MANAGER_IS_SYSTEM(UNIT(s)->manager) && unit_has_name(UNIT(s), SPECIAL_DBUS_SERVICE));
 
         strv_free_and_replace(exec_params.environment, final_env);
@@ -2371,12 +2350,7 @@ static void service_enter_restart(Service *s) {
 
         if (unit_has_job_type(UNIT(s), JOB_STOP)) {
                 /* Don't restart things if we are going down anyway */
-                log_unit_info(UNIT(s), "Stop job pending for unit, delaying automatic restart.");
-
-                r = service_arm_timer(s, usec_add(now(CLOCK_MONOTONIC), s->restart_usec));
-                if (r < 0)
-                        goto fail;
-
+                log_unit_info(UNIT(s), "Stop job pending for unit, skipping automatic restart.");
                 return;
         }
 
@@ -2485,6 +2459,7 @@ static void service_run_next_control(Service *s) {
                           EXEC_APPLY_SANDBOXING|EXEC_APPLY_CHROOT|EXEC_IS_CONTROL|
                           (IN_SET(s->control_command_id, SERVICE_EXEC_CONDITION, SERVICE_EXEC_START_PRE, SERVICE_EXEC_STOP_POST) ? EXEC_APPLY_TTY_STDIN : 0)|
                           (IN_SET(s->control_command_id, SERVICE_EXEC_STOP, SERVICE_EXEC_STOP_POST) ? EXEC_SETENV_RESULT : 0)|
+                          (IN_SET(s->control_command_id, SERVICE_EXEC_START_PRE, SERVICE_EXEC_START) ? EXEC_SETENV_MONITOR_RESULT : 0)|
                           (IN_SET(s->control_command_id, SERVICE_EXEC_START_POST, SERVICE_EXEC_RELOAD, SERVICE_EXEC_STOP, SERVICE_EXEC_STOP_POST) ? EXEC_CONTROL_CGROUP : 0),
                           &s->control_pid);
         if (r < 0)
@@ -2521,7 +2496,7 @@ static void service_run_next_main(Service *s) {
         r = service_spawn(s,
                           s->main_command,
                           s->timeout_start_usec,
-                          EXEC_PASS_FDS|EXEC_APPLY_SANDBOXING|EXEC_APPLY_CHROOT|EXEC_APPLY_TTY_STDIN|EXEC_SET_WATCHDOG,
+                          EXEC_PASS_FDS|EXEC_APPLY_SANDBOXING|EXEC_APPLY_CHROOT|EXEC_APPLY_TTY_STDIN|EXEC_SET_WATCHDOG|EXEC_SETENV_MONITOR_RESULT,
                           &pid);
         if (r < 0)
                 goto fail;
@@ -4320,6 +4295,60 @@ static int service_get_timeout(Unit *u, usec_t *timeout) {
         return 1;
 }
 
+static bool pick_up_pid_from_bus_name(Service *s) {
+        assert(s);
+
+        /* If the service is running but we have no main PID yet, get it from the owner of the D-Bus name */
+
+        return !pid_is_valid(s->main_pid) &&
+                IN_SET(s->state,
+                       SERVICE_START,
+                       SERVICE_START_POST,
+                       SERVICE_RUNNING,
+                       SERVICE_RELOAD);
+}
+
+static int bus_name_pid_lookup_callback(sd_bus_message *reply, void *userdata, sd_bus_error *ret_error) {
+        const sd_bus_error *e;
+        Unit *u = userdata;
+        uint32_t pid;
+        Service *s;
+        int r;
+
+        assert(reply);
+        assert(u);
+
+        s = SERVICE(u);
+        s->bus_name_pid_lookup_slot = sd_bus_slot_unref(s->bus_name_pid_lookup_slot);
+
+        if (!s->bus_name || !pick_up_pid_from_bus_name(s))
+                return 1;
+
+        e = sd_bus_message_get_error(reply);
+        if (e) {
+                r = sd_bus_error_get_errno(e);
+                log_warning_errno(r, "GetConnectionUnixProcessID() failed: %s", bus_error_message(e, r));
+                return 1;
+        }
+
+        r = sd_bus_message_read(reply, "u", &pid);
+        if (r < 0) {
+                bus_log_parse_error(r);
+                return 1;
+        }
+
+        if (!pid_is_valid(pid)) {
+                log_debug_errno(SYNTHETIC_ERRNO(EINVAL), "GetConnectionUnixProcessID() returned invalid PID");
+                return 1;
+        }
+
+        log_unit_debug(u, "D-Bus name %s is now owned by process " PID_FMT, s->bus_name, (pid_t) pid);
+
+        service_set_main_pid(s, pid);
+        unit_watch_pid(UNIT(s), pid, false);
+        return 1;
+}
+
 static void service_bus_name_owner_change(Unit *u, const char *new_owner) {
 
         Service *s = SERVICE(u);
@@ -4350,28 +4379,25 @@ static void service_bus_name_owner_change(Unit *u, const char *new_owner) {
                 else if (s->state == SERVICE_START && new_owner)
                         service_enter_start_post(s);
 
-        } else if (new_owner &&
-                   s->main_pid <= 0 &&
-                   IN_SET(s->state,
-                          SERVICE_START,
-                          SERVICE_START_POST,
-                          SERVICE_RUNNING,
-                          SERVICE_RELOAD)) {
-
-                _cleanup_(sd_bus_creds_unrefp) sd_bus_creds *creds = NULL;
-                pid_t pid;
+        } else if (new_owner && pick_up_pid_from_bus_name(s)) {
 
                 /* Try to acquire PID from bus service */
 
-                r = sd_bus_get_name_creds(u->manager->api_bus, s->bus_name, SD_BUS_CREDS_PID, &creds);
-                if (r >= 0)
-                        r = sd_bus_creds_get_pid(creds, &pid);
-                if (r >= 0) {
-                        log_unit_debug(u, "D-Bus name %s is now owned by process " PID_FMT, s->bus_name, pid);
+                s->bus_name_pid_lookup_slot = sd_bus_slot_unref(s->bus_name_pid_lookup_slot);
 
-                        service_set_main_pid(s, pid);
-                        unit_watch_pid(UNIT(s), pid, false);
-                }
+                r = sd_bus_call_method_async(
+                                u->manager->api_bus,
+                                &s->bus_name_pid_lookup_slot,
+                                "org.freedesktop.DBus",
+                                "/org/freedesktop/DBus",
+                                "org.freedesktop.DBus",
+                                "GetConnectionUnixProcessID",
+                                bus_name_pid_lookup_callback,
+                                s,
+                                "s",
+                                s->bus_name);
+                if (r < 0)
+                        log_debug_errno(r, "Failed to request owner PID of service name, ignoring: %m");
         }
 }
 
@@ -4621,7 +4647,7 @@ static const char* const service_type_table[_SERVICE_TYPE_MAX] = {
 DEFINE_STRING_TABLE_LOOKUP(service_type, ServiceType);
 
 static const char* const service_exit_type_table[_SERVICE_EXIT_TYPE_MAX] = {
-        [SERVICE_EXIT_MAIN] = "main",
+        [SERVICE_EXIT_MAIN]   = "main",
         [SERVICE_EXIT_CGROUP] = "cgroup",
 };
 

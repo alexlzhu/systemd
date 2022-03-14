@@ -15,6 +15,8 @@ runas() {
 runas testuser systemd-run --wait --user --unit=test-private-users \
     -p PrivateUsers=yes -P echo hello
 
+runas testuser systemctl --user log-level debug
+
 runas testuser systemd-run --wait --user --unit=test-private-tmp-innerfile \
     -p PrivateUsers=yes -p PrivateTmp=yes \
     -P touch /tmp/innerfile.txt
@@ -65,6 +67,36 @@ runas testuser systemd-run --wait --user --unit=test-group-fail \
     -p PrivateUsers=yes -p Group=daemon \
     -P true \
     && { echo 'unexpected success'; exit 1; }
+
+# Check that with a new user namespace we can bind mount
+# files and use a different root directory
+runas testuser systemd-run --wait --user --unit=test-bind-mount \
+    -p PrivateUsers=yes -p BindPaths=/dev/null:/etc/os-release \
+    test ! -s /etc/os-release
+
+unsquashfs -no-xattrs -d /tmp/img /usr/share/minimal_0.raw
+runas testuser systemd-run --wait --user --unit=test-root-dir \
+    -p PrivateUsers=yes -p RootDirectory=/tmp/img \
+    grep MARKER=1 /etc/os-release
+
+mkdir /tmp/img_bind
+mount --bind /tmp/img /tmp/img_bind
+runas testuser systemd-run --wait --user --unit=test-root-dir-bind \
+    -p PrivateUsers=yes -p RootDirectory=/tmp/img_bind \
+    grep MARKER=1 /etc/os-release
+
+# Unprivileged overlayfs was added to Linux 5.11, so try to detect it first
+mkdir -p /tmp/a /tmp/b /tmp/c
+if unshare --mount --user --map-root-user mount -t overlay overlay /tmp/c -o lowerdir=/tmp/a:/tmp/b; then
+    unsquashfs -no-xattrs -d /tmp/app2 /usr/share/app1.raw
+    runas testuser systemd-run --wait --user --unit=test-extension-dir \
+        -p PrivateUsers=yes -p ExtensionDirectories=/tmp/app2 \
+        -p TemporaryFileSystem=/run -p RootDirectory=/tmp/img \
+        -p MountAPIVFS=yes \
+        grep PORTABLE_PREFIXES=app1 /usr/lib/extension-release.d/extension-release.app2
+fi
+
+umount /tmp/img_bind
 
 systemd-analyze log-level info
 

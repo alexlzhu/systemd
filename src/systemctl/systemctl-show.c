@@ -421,7 +421,7 @@ static void print_status_info(
                     STRPTR_IN_SET(i->active_state, "activating")          ? i->inactive_exit_timestamp :
                                                                             i->active_exit_timestamp;
 
-        if (timestamp > 0 && timestamp < USEC_INFINITY) {
+        if (timestamp_is_set(timestamp)) {
                 printf(" since %s; %s\n",
                        FORMAT_TIMESTAMP_STYLE(timestamp, arg_timestamp_style),
                        FORMAT_TIMESTAMP_RELATIVE(timestamp));
@@ -432,6 +432,18 @@ static void print_status_info(
                         printf("      Until: %s; %s\n",
                                FORMAT_TIMESTAMP_STYLE(until_timestamp, arg_timestamp_style),
                                FORMAT_TIMESTAMP_RELATIVE(until_timestamp));
+                }
+
+                if (!endswith(i->id, ".target") &&
+                        STRPTR_IN_SET(i->active_state, "inactive", "failed") &&
+                        timestamp_is_set(i->active_enter_timestamp) &&
+                        timestamp_is_set(i->active_exit_timestamp) &&
+                        i->active_exit_timestamp >= i->active_enter_timestamp) {
+
+                        usec_t duration;
+
+                        duration = i->active_exit_timestamp - i->active_enter_timestamp;
+                        printf("   Duration: %s\n", FORMAT_TIMESPAN(duration, MSEC_PER_SEC));
                 }
         } else
                 printf("\n");
@@ -455,7 +467,7 @@ static void print_status_info(
                 dual_timestamp_get(&nw);
                 next_elapse = calc_next_elapse(&nw, &next);
 
-                if (next_elapse > 0 && next_elapse < USEC_INFINITY)
+                if (timestamp_is_set(next_elapse))
                         printf("    Trigger: %s; %s\n",
                                FORMAT_TIMESTAMP_STYLE(next_elapse, arg_timestamp_style),
                                FORMAT_TIMESTAMP_RELATIVE(next_elapse));
@@ -984,6 +996,20 @@ static int print_property(const char *name, const char *expected_value, sd_bus_m
                                 return r;
 
                         bus_print_property_valuef(name, expected_value, flags, "%s", strna(mpol_to_string(i)));
+
+                        return 1;
+                }
+                break;
+
+        case SD_BUS_TYPE_UINT64:
+                if (endswith(name, "Timestamp")) {
+                        uint64_t timestamp;
+
+                        r = sd_bus_message_read_basic(m, bus_type, &timestamp);
+                        if (r < 0)
+                                return r;
+
+                        bus_print_property_value(name, expected_value, flags, FORMAT_TIMESTAMP_STYLE(timestamp, arg_timestamp_style));
 
                         return 1;
                 }
@@ -2132,7 +2158,7 @@ static int show_system_status(sd_bus *bus) {
         return 0;
 }
 
-int show(int argc, char *argv[], void *userdata) {
+int verb_show(int argc, char *argv[], void *userdata) {
         bool new_line = false, ellipsized = false;
         SystemctlShowMode show_mode;
         int r, ret = 0;
@@ -2142,7 +2168,7 @@ int show(int argc, char *argv[], void *userdata) {
 
         show_mode = systemctl_show_mode_from_string(argv[0]);
         if (show_mode < 0)
-                return log_error_errno(show_mode, "Invalid argument.");
+                return log_error_errno(show_mode, "Invalid argument '%s'.", argv[0]);
 
         if (show_mode == SYSTEMCTL_SHOW_HELP && argc <= 1)
                 return log_error_errno(SYNTHETIC_ERRNO(EINVAL),

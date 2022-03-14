@@ -126,7 +126,7 @@ usec_t map_clock_usec(usec_t from, clockid_t from_clock, clockid_t to_clock) {
 dual_timestamp* dual_timestamp_from_realtime(dual_timestamp *ts, usec_t u) {
         assert(ts);
 
-        if (u == USEC_INFINITY || u == 0) {
+        if (!timestamp_is_set(u)) {
                 ts->realtime = ts->monotonic = u;
                 return ts;
         }
@@ -141,7 +141,7 @@ triple_timestamp* triple_timestamp_from_realtime(triple_timestamp *ts, usec_t u)
 
         assert(ts);
 
-        if (u == USEC_INFINITY || u == 0) {
+        if (!timestamp_is_set(u)) {
                 ts->realtime = ts->monotonic = ts->boottime = u;
                 return ts;
         }
@@ -320,11 +320,13 @@ char *format_timestamp_style(
         time_t sec;
         size_t n;
         bool utc = false, us = false;
+        int r;
 
         assert(buf);
 
         switch (style) {
                 case TIMESTAMP_PRETTY:
+                case TIMESTAMP_UNIX:
                         break;
                 case TIMESTAMP_US:
                         us = true;
@@ -347,8 +349,16 @@ char *format_timestamp_style(
                           1 + 1 +              /* space and shortest possible zone */
                           1))
                 return NULL; /* Not enough space even for the shortest form. */
-        if (t <= 0 || t == USEC_INFINITY)
+        if (!timestamp_is_set(t))
                 return NULL; /* Timestamp is unset */
+
+        if (style == TIMESTAMP_UNIX) {
+                r = snprintf(buf, l, "@" USEC_FMT, t / USEC_PER_SEC);  /* round down µs → s */
+                if (r < 0 || (size_t) r >= l)
+                        return NULL; /* Doesn't fit */
+
+                return buf;
+        }
 
         /* Let's not format times with years > 9999 */
         if (t > USEC_TIMESTAMP_FORMATTABLE_MAX) {
@@ -417,7 +427,7 @@ char *format_timestamp_relative(char *buf, size_t l, usec_t t) {
         const char *s;
         usec_t n, d;
 
-        if (t <= 0 || t == USEC_INFINITY)
+        if (!timestamp_is_set(t))
                 return NULL;
 
         n = now(CLOCK_REALTIME);
@@ -781,6 +791,16 @@ static int parse_timestamp_impl(const char *t, usec_t *usec, bool with_tz) {
 
         tm = copy;
         k = strptime(t, "%Y-%m-%d %H:%M:%S", &tm);
+        if (k) {
+                if (*k == '.')
+                        goto parse_usec;
+                else if (*k == 0)
+                        goto from_tm;
+        }
+
+        /* Support OUTPUT_SHORT and OUTPUT_SHORT_PRECISE formats */
+        tm = copy;
+        k = strptime(t, "%b %d %H:%M:%S", &tm);
         if (k) {
                 if (*k == '.')
                         goto parse_usec;
@@ -1632,6 +1652,7 @@ static const char* const timestamp_style_table[_TIMESTAMP_STYLE_MAX] = {
         [TIMESTAMP_US] = "us",
         [TIMESTAMP_UTC] = "utc",
         [TIMESTAMP_US_UTC] = "us+utc",
+        [TIMESTAMP_UNIX] = "unix",
 };
 
 /* Use the macro for enum → string to allow for aliases */

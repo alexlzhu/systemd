@@ -92,6 +92,7 @@ int device_path_parse_major_minor(const char *path, mode_t *ret_mode, dev_t *ret
 
 int proc_mounted(void);
 
+bool stat_inode_same(const struct stat *a, const struct stat *b);
 bool stat_inode_unmodified(const struct stat *a, const struct stat *b);
 
 int statx_fallback(int dfd, const char *path, int flags, unsigned mask, struct statx *sx);
@@ -114,3 +115,9 @@ int statx_fallback(int dfd, const char *path, int flags, unsigned mask, struct s
                 struct new_statx nsx;           \
         } var
 #endif
+
+static inline bool devid_set_and_equal(dev_t a, dev_t b) {
+        /* Returns true if a and b definitely refer to the same device. If either is zero, this means "don't
+         * know" and we'll return false */
+        return a == b && a != 0;
+}

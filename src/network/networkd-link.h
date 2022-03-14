@@ -21,6 +21,7 @@
 #include "log-link.h"
 #include "netif-util.h"
 #include "network-util.h"
+#include "networkd-ipv6ll.h"
 #include "networkd-util.h"
 #include "ordered-set.h"
 #include "resolve-util.h"
@@ -40,6 +41,7 @@ typedef enum LinkState {
 
 typedef struct Manager Manager;
 typedef struct Network Network;
+typedef struct NetDev NetDev;
 typedef struct DUID DUID;
 
 typedef struct Link {
@@ -67,6 +69,9 @@ typedef struct Link {
         sd_device *sd_device;
         char *driver;
 
+        /* link local addressing */
+        IPv6LinkLocalAddressGenMode ipv6ll_address_gen_mode;
+
         /* wlan */
         enum nl80211_iftype wlan_iftype;
         char *ssid;
@@ -79,6 +84,7 @@ typedef struct Link {
         sd_event_source *carrier_lost_timer;
 
         Network *network;
+        NetDev *netdev;
 
         LinkState state;
         LinkOperationalState operstate;
@@ -102,13 +108,13 @@ typedef struct Link {
         unsigned set_link_messages;
         unsigned set_flags_messages;
         unsigned create_stacked_netdev_messages;
-        unsigned create_stacked_netdev_after_configured_messages;
 
         Set *addresses;
         Set *neighbors;
         Set *routes;
         Set *nexthops;
-        Set *traffic_control;
+        Set *qdiscs;
+        Set *tclasses;
 
         sd_dhcp_client *dhcp_client;
         sd_dhcp_lease *dhcp_lease;
@@ -136,7 +142,6 @@ typedef struct Link {
         bool activated:1;
         bool master_set:1;
         bool stacked_netdevs_created:1;
-        bool stacked_netdevs_after_configured_created:1;
 
         sd_dhcp_server *dhcp_server;
 
@@ -220,8 +225,6 @@ static inline bool link_has_carrier(Link *link) {
 }
 
 bool link_ipv6_enabled(Link *link);
-bool link_ipv6ll_enabled(Link *link);
-bool link_may_have_ipv6ll(Link *link);
 int link_ipv6ll_gained(Link *link);
 
 bool link_ipv4ll_enabled(Link *link);

@@ -5,12 +5,14 @@ OriginalName=
 Path=
 Driver=
 Type=
+Kind=
 Property=
 Host=
 Virtualization=
 KernelCommandLine=
 KernelVersion=
 Architecture=
+Firmware=
 [Link]
 Description=
 MACAddressPolicy=

@@ -121,7 +121,7 @@ static int netdev_bridge_post_create_message(NetDev *netdev, sd_netlink_message 
         }
 
         if (b->vlan_protocol >= 0) {
-                r = sd_netlink_message_append_u16(req, IFLA_BR_VLAN_PROTOCOL, b->vlan_protocol);
+                r = sd_netlink_message_append_u16(req, IFLA_BR_VLAN_PROTOCOL, htobe16(b->vlan_protocol));
                 if (r < 0)
                         return r;
         }
@@ -149,7 +149,7 @@ static int netdev_bridge_post_create_message(NetDev *netdev, sd_netlink_message 
         return 0;
 }
 
-static int netdev_bridge_post_create(NetDev *netdev, Link *link, sd_netlink_message *m) {
+static int netdev_bridge_post_create(NetDev *netdev, Link *link) {
         _cleanup_(sd_netlink_message_unrefp) sd_netlink_message *req = NULL;
         int r;
 
@@ -284,7 +284,7 @@ const NetDevVTable bridge_vtable = {
         .init = bridge_init,
         .sections = NETDEV_COMMON_SECTIONS "Bridge\0",
         .post_create = netdev_bridge_post_create,
-        .create_type = NETDEV_CREATE_MASTER,
+        .create_type = NETDEV_CREATE_INDEPENDENT,
         .iftype = ARPHRD_ETHER,
         .generate_mac = true,
 };

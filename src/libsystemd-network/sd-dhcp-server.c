@@ -12,6 +12,7 @@
 #include "alloc-util.h"
 #include "dhcp-internal.h"
 #include "dhcp-server-internal.h"
+#include "dns-domain.h"
 #include "fd-util.h"
 #include "in-addr-util.h"
 #include "io-util.h"
@@ -21,6 +22,7 @@
 #include "siphash24.h"
 #include "string-util.h"
 #include "unaligned.h"
+#include "utf8.h"
 
 #define DHCP_DEFAULT_LEASE_TIME_USEC USEC_PER_HOUR
 #define DHCP_MAX_LEASE_TIME_USEC (USEC_PER_HOUR*12)
@@ -162,6 +164,8 @@ static sd_dhcp_server *dhcp_server_free(sd_dhcp_server *server) {
 
         sd_event_unref(server->event);
 
+        free(server->boot_server_name);
+        free(server->boot_filename);
         free(server->timezone);
 
         for (sd_dhcp_lease_server_type_t i = 0; i < _SD_DHCP_LEASE_SERVER_TYPE_MAX; i++)
@@ -268,6 +272,42 @@ sd_event *sd_dhcp_server_get_event(sd_dhcp_server *server) {
         assert_return(server, NULL);
 
         return server->event;
+}
+
+int sd_dhcp_server_set_boot_server_address(sd_dhcp_server *server, const struct in_addr *address) {
+        assert_return(server, -EINVAL);
+
+        if (address)
+                server->boot_server_address = *address;
+        else
+                server->boot_server_address = (struct in_addr) {};
+
+        return 0;
+}
+
+int sd_dhcp_server_set_boot_server_name(sd_dhcp_server *server, const char *name) {
+        int r;
+
+        assert_return(server, -EINVAL);
+
+        if (name) {
+                r = dns_name_is_valid(name);
+                if (r < 0)
+                        return r;
+                if (r == 0)
+                        return -EINVAL;
+        }
+
+        return free_and_strdup(&server->boot_server_name, name);
+}
+
+int sd_dhcp_server_set_boot_filename(sd_dhcp_server *server, const char *filename) {
+        assert_return(server, -EINVAL);
+
+        if (filename && (!string_is_safe(filename) || !ascii_is_valid(filename)))
+                return -EINVAL;
+
+        return free_and_strdup(&server->boot_filename, filename);
 }
 
 int sd_dhcp_server_stop(sd_dhcp_server *server) {
@@ -539,6 +579,7 @@ static int server_send_offer_or_ack(
                 return r;
 
         packet->dhcp.yiaddr = address;
+        packet->dhcp.siaddr = server->boot_server_address.s_addr;
 
         lease_time = htobe32(req->lifetime);
         r = dhcp_option_append(&packet->dhcp, req->max_optlen, &offset, 0,
@@ -558,6 +599,22 @@ static int server_send_offer_or_ack(
                                        in4_addr_is_set(&server->router_address) ?
                                        &server->router_address.s_addr :
                                        &server->address);
+                if (r < 0)
+                        return r;
+        }
+
+        if (server->boot_server_name) {
+                r = dhcp_option_append(&packet->dhcp, req->max_optlen, &offset, 0,
+                                       SD_DHCP_OPTION_BOOT_SERVER_NAME,
+                                       strlen(server->boot_server_name), server->boot_server_name);
+                if (r < 0)
+                        return r;
+        }
+
+        if (server->boot_filename) {
+                r = dhcp_option_append(&packet->dhcp, req->max_optlen, &offset, 0,
+                                       SD_DHCP_OPTION_BOOT_FILENAME,
+                                       strlen(server->boot_filename), server->boot_filename);
                 if (r < 0)
                         return r;
         }
@@ -589,7 +646,7 @@ static int server_send_offer_or_ack(
                 if (server->timezone) {
                         r = dhcp_option_append(
                                         &packet->dhcp, req->max_optlen, &offset, 0,
-                                        SD_DHCP_OPTION_NEW_TZDB_TIMEZONE,
+                                        SD_DHCP_OPTION_TZDB_TIMEZONE,
                                         strlen(server->timezone), server->timezone);
                         if (r < 0)
                                 return r;
@@ -795,6 +852,9 @@ static bool address_is_in_pool(sd_dhcp_server *server, be32_t address) {
         assert(server);
 
         if (server->pool_size == 0)
+                return false;
+
+        if (address == server->address)
                 return false;
 
         if (be32toh(address) < (be32toh(server->subnet) | server->pool_offset) ||

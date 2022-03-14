@@ -592,9 +592,9 @@ int mode_to_inaccessible_node(
         return 0;
 }
 
-int mount_flags_to_string(long unsigned flags, char **ret) {
+int mount_flags_to_string(unsigned long flags, char **ret) {
         static const struct {
-                long unsigned flag;
+                unsigned long flag;
                 const char *name;
         } map[] = {
                 { .flag = MS_RDONLY,      .name = "MS_RDONLY",      },
@@ -816,7 +816,7 @@ static int mount_in_namespace(
                 return log_debug_errno(errno, "Failed to fstat mount namespace FD of systemd: %m");
 
         /* We can't add new mounts at runtime if the process wasn't started in a namespace */
-        if (st.st_ino == self_mntns_st.st_ino && st.st_dev == self_mntns_st.st_dev)
+        if (stat_inode_same(&st, &self_mntns_st))
                 return log_debug_errno(SYNTHETIC_ERRNO(EINVAL), "Failed to activate bind mount in target, not running in a mount namespace");
 
         /* One day, when bind mounting /proc/self/fd/n works across namespace boundaries we should rework

@@ -125,15 +125,12 @@ static char *combine_entries(const char *one, const char *two) {
 
         /* Body from @one */
         n = l1 - (b1 - one);
-        if (n > 0) {
-                memcpy(p, b1, n);
-                p += n;
-
+        if (n > 0)
+                p = mempcpy(p, b1, n);
         /* Body from @two */
-        } else {
+        else {
                 n = l2 - (b2 - two);
-                memcpy(p, b2, n);
-                p += n;
+                p = mempcpy(p, b2, n);
         }
 
         assert(p - dest <= (ptrdiff_t)(l1 + l2));
@@ -524,10 +521,10 @@ static int open_mmap(const char *database, int *_fd, struct stat *_st, void **_p
         if (fstat(fd, &st) < 0)
                 return -errno;
 
-        if (st.st_size < (off_t) sizeof(CatalogHeader))
+        if (st.st_size < (off_t) sizeof(CatalogHeader) || file_offset_beyond_memory_size(st.st_size))
                 return -EINVAL;
 
-        p = mmap(NULL, PAGE_ALIGN(st.st_size), PROT_READ, MAP_SHARED, fd, 0);
+        p = mmap(NULL, st.st_size, PROT_READ, MAP_SHARED, fd, 0);
         if (p == MAP_FAILED)
                 return -errno;
 

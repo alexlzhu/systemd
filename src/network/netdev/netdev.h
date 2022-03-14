@@ -43,6 +43,7 @@
         "-VXLAN\0"                                \
         "-WireGuard\0"                            \
         "-WireGuardPeer\0"                        \
+        "-VirtualWLAN\0"                          \
         "-Xfrm\0"
 
 typedef enum NetDevKind {
@@ -82,6 +83,7 @@ typedef enum NetDevKind {
         NETDEV_KIND_VXCAN,
         NETDEV_KIND_VXLAN,
         NETDEV_KIND_WIREGUARD,
+        NETDEV_KIND_WLAN,
         NETDEV_KIND_XFRM,
         _NETDEV_KIND_MAX,
         _NETDEV_KIND_TUNNEL, /* Used by config_parse_stacked_netdev() */
@@ -100,16 +102,13 @@ typedef enum NetDevState {
 
 typedef enum NetDevCreateType {
         NETDEV_CREATE_INDEPENDENT,
-        NETDEV_CREATE_MASTER,
         NETDEV_CREATE_STACKED,
-        NETDEV_CREATE_AFTER_CONFIGURED,
         _NETDEV_CREATE_MAX,
         _NETDEV_CREATE_INVALID = -EINVAL,
 } NetDevCreateType;
 
 typedef struct Manager Manager;
 typedef struct Condition Condition;
-typedef struct Request Request;
 
 typedef struct NetDev {
         Manager *manager;
@@ -159,11 +158,8 @@ typedef struct NetDevVTable {
         /* create netdev, if not done via rtnl */
         int (*create)(NetDev *netdev);
 
-        /* create netdev after link is fully configured */
-        int (*create_after_configured)(NetDev *netdev, Link *link);
-
         /* perform additional configuration after netdev has been createad */
-        int (*post_create)(NetDev *netdev, Link *link, sd_netlink_message *message);
+        int (*post_create)(NetDev *netdev, Link *link);
 
         /* verify that compulsory configuration options were specified */
         int (*config_verify)(NetDev *netdev, const char *filename);
@@ -173,6 +169,9 @@ typedef struct NetDevVTable {
 
         /* Generate MAC address when MACAddress= is not specified. */
         bool generate_mac;
+
+        /* When assigning ifindex to the netdev, skip to check if the netdev kind matches. */
+        bool skip_netdev_kind_check;
 } NetDevVTable;
 
 extern const NetDevVTable * const netdev_vtable[_NETDEV_KIND_MAX];
@@ -208,9 +207,7 @@ int netdev_get(Manager *manager, const char *name, NetDev **ret);
 int netdev_set_ifindex(NetDev *netdev, sd_netlink_message *newlink);
 int netdev_generate_hw_addr(NetDev *netdev, Link *link, const char *name,
                             const struct hw_addr_data *hw_addr, struct hw_addr_data *ret);
-int netdev_join(NetDev *netdev, Link *link, link_netlink_message_handler_t cb);
 
-int request_process_stacked_netdev(Request *req);
 int link_request_stacked_netdev(Link *link, NetDev *netdev);
 
 const char *netdev_kind_to_string(NetDevKind d) _const_;

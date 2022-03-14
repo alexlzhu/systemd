@@ -417,10 +417,6 @@ int bus_unit_method_start_generic(
                         return sd_bus_reply_method_errorf(message, SD_BUS_ERROR_INVALID_ARGS,
                                                           "Invalid 'flags' parameter '%" PRIu64 "'",
                                                           input_flags);
-
-                /* The new method unconditionally uses the new behaviour of returning 'skip' when
-                 * a job is skipped. */
-                job_flags |= BUS_UNIT_QUEUE_RETURN_SKIP_ON_CONDITION_FAIL;
         }
 
         r = bus_verify_manage_units_async_full(
@@ -1588,6 +1584,7 @@ const sd_bus_vtable bus_unit_cgroup_vtable[] = {
         SD_BUS_VTABLE_START(0),
         SD_BUS_PROPERTY("Slice", "s", property_get_slice, 0, 0),
         SD_BUS_PROPERTY("ControlGroup", "s", property_get_cgroup, 0, 0),
+        SD_BUS_PROPERTY("ControlGroupId", "t", NULL, offsetof(Unit, cgroup_id), 0),
         SD_BUS_PROPERTY("MemoryCurrent", "t", property_get_current_memory, 0, 0),
         SD_BUS_PROPERTY("MemoryAvailable", "t", property_get_available_memory, 0, 0),
         SD_BUS_PROPERTY("CPUUsageNSec", "t", property_get_cpu_usage, 0, 0),

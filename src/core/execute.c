@@ -1865,11 +1865,11 @@ static int build_environment(
                 our_env[n_env++] = x;
         }
 
-        /* If this is D-Bus, tell the nss-systemd module, since it relies on being able to use D-Bus look up dynamic
-         * users via PID 1, possibly dead-locking the dbus daemon. This way it will not use D-Bus to resolve names, but
-         * check the database directly. */
-        if (p->flags & EXEC_NSS_BYPASS_BUS) {
-                x = strdup("SYSTEMD_NSS_BYPASS_BUS=1");
+        /* If this is D-Bus, tell the nss-systemd module, since it relies on being able to use blocking
+         * Varlink calls back to us for look up dynamic users in PID 1. Break the deadlock between D-Bus and
+         * PID 1 by disabling use of PID1' NSS interface for looking up dynamic users. */
+        if (p->flags & EXEC_NSS_DYNAMIC_BYPASS) {
+                x = strdup("SYSTEMD_NSS_DYNAMIC_BYPASS=1");
                 if (!x)
                         return -ENOMEM;
                 our_env[n_env++] = x;
@@ -3438,7 +3438,8 @@ static int apply_mount_namespace(
         _cleanup_strv_free_ char **empty_directories = NULL, **symlinks = NULL;
         const char *tmp_dir = NULL, *var_tmp_dir = NULL;
         const char *root_dir = NULL, *root_image = NULL;
-        _cleanup_free_ char *creds_path = NULL, *incoming_dir = NULL, *propagate_dir = NULL;
+        _cleanup_free_ char *creds_path = NULL, *incoming_dir = NULL, *propagate_dir = NULL,
+                        *extension_dir = NULL;
         NamespaceInfo ns_info;
         bool needs_sandboxing;
         BindMount *bind_mounts = NULL;
@@ -3537,7 +3538,17 @@ static int apply_mount_namespace(
                         r = -ENOMEM;
                         goto finalize;
                 }
-        }
+
+                extension_dir = strdup("/run/systemd/unit-extensions");
+                if (!extension_dir) {
+                        r = -ENOMEM;
+                        goto finalize;
+                }
+        } else
+                if (asprintf(&extension_dir, "/run/user/" UID_FMT "/systemd/unit-extensions", geteuid()) < 0) {
+                        r = -ENOMEM;
+                        goto finalize;
+                }
 
         r = setup_namespace(root_dir, root_image, context->root_image_options,
                             &ns_info, context->read_write_paths,
@@ -3566,6 +3577,7 @@ static int apply_mount_namespace(
                             context->extension_directories,
                             propagate_dir,
                             incoming_dir,
+                            extension_dir,
                             root_dir || root_image ? params->notify_socket : NULL,
                             error_path);
 
@@ -4250,6 +4262,12 @@ static int exec_child(
                 }
 
                 r = cg_attach_everywhere(params->cgroup_supported, p, 0, NULL, NULL);
+                if (r == -EUCLEAN) {
+                        *exit_status = EXIT_CGROUP;
+                        return log_unit_error_errno(unit, r, "Failed to attach process to cgroup %s "
+                                                    "because the cgroup or one of its parents or "
+                                                    "siblings is in the threaded mode: %m", p);
+                }
                 if (r < 0) {
                         *exit_status = EXIT_CGROUP;
                         return log_unit_error_errno(unit, r, "Failed to attach to cgroup %s: %m", p);
@@ -4453,12 +4471,9 @@ static int exec_child(
                 return log_oom();
         }
 
-        /* The PATH variable is set to the default path in params->environment.
-         * However, this is overridden if user specified fields have PATH set.
-         * The intention is to also override PATH if the user does
-         * not specify PATH and the user has specified ExecSearchPath
-         */
-
+        /* The $PATH variable is set to the default path in params->environment. However, this is overridden
+         * if user-specified fields have $PATH set. The intention is to also override $PATH if the unit does
+         * not specify PATH but the unit has ExecSearchPath. */
         if (!strv_isempty(context->exec_search_path)) {
                 _cleanup_free_ char *joined = NULL;
 
@@ -4495,22 +4510,26 @@ static int exec_child(
                 return log_unit_error_errno(unit, r, "Failed to set up kernel keyring: %m");
         }
 
-        /* We need sandboxing if the caller asked us to apply it and the command isn't explicitly excepted from it */
+        /* We need sandboxing if the caller asked us to apply it and the command isn't explicitly excepted
+         * from it. */
         needs_sandboxing = (params->flags & EXEC_APPLY_SANDBOXING) && !(command->flags & EXEC_COMMAND_FULLY_PRIVILEGED);
 
-        /* We need the ambient capability hack, if the caller asked us to apply it and the command is marked for it, and the kernel doesn't actually support ambient caps */
+        /* We need the ambient capability hack, if the caller asked us to apply it and the command is marked
+         * for it, and the kernel doesn't actually support ambient caps. */
         needs_ambient_hack = (params->flags & EXEC_APPLY_SANDBOXING) && (command->flags & EXEC_COMMAND_AMBIENT_MAGIC) && !ambient_capabilities_supported();
 
-        /* We need setresuid() if the caller asked us to apply sandboxing and the command isn't explicitly excepted from either whole sandboxing or just setresuid() itself, and the ambient hack is not desired */
+        /* We need setresuid() if the caller asked us to apply sandboxing and the command isn't explicitly
+         * excepted from either whole sandboxing or just setresuid() itself, and the ambient hack is not
+         * desired. */
         if (needs_ambient_hack)
                 needs_setuid = false;
         else
                 needs_setuid = (params->flags & EXEC_APPLY_SANDBOXING) && !(command->flags & (EXEC_COMMAND_FULLY_PRIVILEGED|EXEC_COMMAND_NO_SETUID));
 
         if (needs_sandboxing) {
-                /* MAC enablement checks need to be done before a new mount ns is created, as they rely on /sys being
-                 * present. The actual MAC context application will happen later, as late as possible, to avoid
-                 * impacting our own code paths. */
+                /* MAC enablement checks need to be done before a new mount ns is created, as they rely on
+                 * /sys being present. The actual MAC context application will happen later, as late as
+                 * possible, to avoid impacting our own code paths. */
 
 #if HAVE_SELINUX
                 use_selinux = mac_selinux_use();
